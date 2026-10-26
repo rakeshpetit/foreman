@@ -45,7 +45,7 @@ tg  ─┼─▶ commands ──▶ engine ──▶ stage executors ──┬�
 | `config` | Loading and merging the three layers, validating `pipeline.toml`, parsing AGENT.md, resolving skills | `loadConfig(targetRepo, requestOverrides) → ResolvedConfig`, `agentsFor(task, stage)` |
 | `engine` | The state machine: picking the next actionable Task, leases, routing pass/fail, Rounds, Breaker, Milestone completion | `tick() → TickResult`, pure routing in `route(stage, verdict, task) → Transition` |
 | `runner` | Running one Agent Run: assembling the prompt, launching the container, collecting the result | `Runner.run(RunSpec) → RunResult` (impls: `FakeRunner`, `ContainerRunner`) |
-| `gates` | Each Gate as a small function over the worktree and the database | `Gate.check(ctx) → {passed, detail}`, registered by name |
+| `gates` | Each Gate as a small function over the worktree and the database | `Gate.check(ctx) → {passed, detail}`, registered by name. A Gate returns this `GateResult`, never a Verdict; the gate executor turns `passed` into the Stage's `PASS` or `FAIL` |
 | `git` | Worktrees, branches, commits, `--no-ff` merges, push, diff stats, red-before checkouts | `Git` (impls: real git; tests use temp repos with a bare remote) |
 | `owner` | Approval requests and replies, Escalations, Proposals, Consent, Precedents | `request(kind, subject)`, `decide(id, verdict, notes)` |
 | `commands` | Every Owner command, used by both the CLI and Telegram | `execute(Command) → Reply` |
@@ -66,6 +66,12 @@ tg  ─┼─▶ commands ──▶ engine ──▶ stage executors ──┬�
 Every step is idempotent, so a crash mid-Run is recovered by the Sweeper.
 
 **Stages are data.** The engine knows only three executor types: `agent`, `gate` and `owner`. Workup, Implement, Review, Verify and Research are names in `pipeline.toml`, not code paths.
+
+**Agents come from Kinds.** A Stage never names its Agents. `agentsFor(task, stage)` takes the Task's per-Task override, then its Kind's entry for the Stage, then the `default` Kind's entry (ADR 0011). Every agent Stage must have a `[kinds.default]` entry, which config validation checks.
+
+**Overrides at Go.** The per-Task Agent overrides "recorded at Go" are written straight to `agent_overrides` until M7-T06 adds `foreman go --agent`. Until then they are a seam for tests, not something an Owner can set.
+
+**Lanes.** Lane skipping (a Stage's `lanes`, and a failed Stage's `on_fail` target having to run in the same lanes) landed with M2-T02. M10-T01 therefore adds only the fast lane's size threshold and its one-review-Round limit.
 
 ## Data model (SQLite)
 

@@ -2,6 +2,7 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { type Agent, splitFrontmatter } from "./agent.ts";
+import { ConfigFileError, stripBom } from "./issues.ts";
 
 /** foreman's own checkout, where its `skills/` folder lives. */
 export const FOREMAN_DIR = join(import.meta.dirname, "..", "..");
@@ -49,15 +50,7 @@ export interface SkillOptions {
 }
 
 /** Every Skill that could not be found, one readable line each (`issues`), prefixed by its source. */
-export class SkillError extends Error {
-  readonly issues: string[];
-
-  constructor(issues: string[], source?: string) {
-    super(issues.map((i) => (source ? `${source}: ${i}` : i)).join("\n"));
-    this.name = "SkillError";
-    this.issues = issues;
-  }
-}
+export class SkillError extends ConfigFileError {}
 
 /**
  * Finds the folder of each Skill an Agent names, and the body of each preloaded one. Throws a
@@ -111,6 +104,6 @@ function isFile(path: string): boolean {
 }
 
 function skillBody(path: string): string {
-  const text = readFileSync(path, "utf8").replace(/^﻿/, "");
+  const text = stripBom(readFileSync(path, "utf8"));
   return splitFrontmatter(text)?.body ?? text;
 }

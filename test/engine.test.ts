@@ -1,32 +1,37 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
-import { DEFAULT_PIPELINE_PATH, loadPipeline, parsePipeline } from "../src/config/pipeline.ts";
-import { route, type Verdict } from "../src/engine/route.ts";
+import { afterEach, test } from "node:test";
+import { parsePipeline } from "../src/config/pipeline.ts";
+import { route } from "../src/engine/route.ts";
 import { dropTask, nextActionable, type StageExecutor, tick } from "../src/engine/tick.ts";
-import { Store } from "../src/store/store.ts";
-import { buildingRequest } from "./helpers.ts";
+import type { RoutedVerdict } from "../src/engine/verdict.ts";
+import { LANES } from "../src/store/lane.ts";
+import { buildingRequest, closeStores, fixturePipeline, memoryStore } from "./helpers.ts";
+
+afterEach(closeStores);
 
 const THREE_STAGES = parsePipeline(`
 [[stages]]
 name = "workup"
 type = "agent"
-agents = ["a"]
 on_fail = "workup"
 
 [[stages]]
 name = "implement"
 type = "agent"
-agents = ["a"]
 on_fail = "implement"
 
 [[stages]]
 name = "review"
 type = "agent"
-agents = ["a"]
 on_fail = "implement"
+
+[kinds.default]
+workup = ["a"]
+implement = ["a"]
+review = ["a"]
 `);
-const DEFAULT = loadPipeline(DEFAULT_PIPELINE_PATH, {});
-const lane = "normal";
+const FIXTURE = fixturePipeline();
+const lane = "normal" as const;
 
 test("route: pass advances, fail returns to implement, last stage is done", () => {
   const t = { round_stage: 0, round_total: 0, lane };
@@ -122,48 +127,50 @@ test("route: on_pass and on_fail come from the config, and a Stage the Task was 
     round_stage,
     round_total,
   });
-  assert.deepEqual(route(DEFAULT, "workup", "PASS", at), goto("red"));
-  assert.deepEqual(route(DEFAULT, "red", "FAIL", at), goto("workup", 1, 1));
-  assert.deepEqual(route(DEFAULT, "gates", "FAIL", at), goto("implement", 1, 1));
-  assert.deepEqual(route(DEFAULT, "review", "PASS", at), goto("verify"));
-  assert.deepEqual(route(DEFAULT, "task_approval", "PASS", at), goto("research"));
-  assert.deepEqual(route(DEFAULT, "research", "PASS", at), {
+  assert.deepEqual(route(FIXTURE, "workup", "PASS", at), goto("red"));
+  assert.deepEqual(route(FIXTURE, "red", "FAIL", at), goto("workup", 1, 1));
+  assert.deepEqual(route(FIXTURE, "gates", "FAIL", at), goto("implement", 1, 1));
+  assert.deepEqual(route(FIXTURE, "review", "PASS", at), goto("task_approval"));
+  assert.deepEqual(route(FIXTURE, "task_approval", "PASS", at), goto("research"));
+  assert.deepEqual(route(FIXTURE, "research", "PASS", at), {
     kind: "done",
     round_stage: 0,
     round_total: 0,
   });
   // Workup is the Stage `red` sends back to, so passing it keeps the count; `gates` is not, so it resets.
   const reworked = { round_stage: 1, round_total: 1, lane };
-  assert.deepEqual(route(DEFAULT, "workup", "PASS", reworked), goto("red", 1, 1));
-  assert.deepEqual(route(DEFAULT, "implement", "PASS", reworked), goto("gates", 1, 1));
-  assert.deepEqual(route(DEFAULT, "gates", "PASS", reworked), goto("review", 0, 1));
+  assert.deepEqual(route(FIXTURE, "workup", "PASS", reworked), goto("red", 1, 1));
+  assert.deepEqual(route(FIXTURE, "implement", "PASS", reworked), goto("gates", 1, 1));
+  assert.deepEqual(route(FIXTURE, "gates", "PASS", reworked), goto("review", 0, 1));
 });
 
-test("route: Stages outside the Task's lane are skipped on pass and on fail", () => {
-  const fast = { round_stage: 0, round_total: 0, lane: "fast" };
+test("route: a pass skips Stages outside the Task's lane", () => {
+  const fast = { round_stage: 0, round_total: 0, lane: "fast" as const };
   const skipping = parsePipeline(
     `[[stages]]
 name = "a"
 type = "agent"
-agents = ["x"]
 on_fail = "a"
 lanes = ["normal"]
 
 [[stages]]
 name = "b"
 type = "agent"
-agents = ["x"]
 on_fail = "a"
 lanes = ["normal"]
 
 [[stages]]
 name = "c"
 type = "agent"
-agents = ["x"]
 on_fail = "c"
 
 [lanes.normal]
 [lanes.fast]
+
+[kinds.default]
+a = ["x"]
+b = ["x"]
+c = ["x"]
 `,
     {},
   );
@@ -177,16 +184,24 @@ on_fail = "c"
     round_stage: 0,
     round_total: 0,
   });
-  assert.deepEqual(route(skipping, "b", "FAIL", fast), {
-    kind: "goto",
-    stage: "c",
-    round_stage: 1,
-    round_total: 1,
-  });
+});
+
+test("route: every FAIL lands on its Stage's on_fail, in every lane the Stage runs in", () => {
+  for (const lane of LANES) {
+    const at = { round_stage: 0, round_total: 0, lane };
+    for (const s of FIXTURE.stages) {
+      if (s.lanes && !s.lanes.includes(lane)) continue;
+      assert.deepEqual(
+        route(FIXTURE, s.name, "FAIL", at),
+        { kind: "goto", stage: s.on_fail, round_stage: 1, round_total: 1 },
+        `${s.name} in ${lane}`,
+      );
+    }
+  }
 });
 
 function seed() {
-  const s = Store.memory();
+  const s = memoryStore();
   const { r, m: m1 } = buildingRequest(s, undefined, "m1");
   const m2 = s.createMilestone({ request_id: r.id, seq: 2, title: "m2" });
   return { s, r, m1, m2 };
@@ -195,37 +210,39 @@ const pass: StageExecutor = async () => "PASS";
 
 test("tick with nothing to do is idle", async () => {
   const { s } = seed();
-  assert.deepEqual(await tick(s, { pipeline: THREE_STAGES, executor: pass }), { kind: "idle" });
+  assert.deepEqual(await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }), {
+    kind: "idle",
+  });
 });
 
 test("tick skips while the queue is paused", async () => {
   const { s, m1 } = seed();
   s.createTask({ milestone_id: m1.id, seq: 1, title: "a" });
   s.setQueueState({ paused: true, paused_until: "2999-01-01T00:00:00Z", reason: "limit" });
-  assert.deepEqual(await tick(s, { pipeline: THREE_STAGES, executor: pass }), {
+  assert.deepEqual(await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }), {
     kind: "paused",
     reason: "limit",
   });
   s.setQueueState({ paused: true, paused_until: null, reason: "owner" });
-  assert.deepEqual(await tick(s, { pipeline: THREE_STAGES, executor: pass }), {
+  assert.deepEqual(await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }), {
     kind: "paused",
     reason: "owner",
   });
   s.setQueueState({ paused: true, paused_until: "2000-01-01T00:00:00Z", reason: "limit" });
-  assert.equal((await tick(s, { pipeline: THREE_STAGES, executor: pass })).kind, "ran");
+  assert.equal((await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass })).kind, "ran");
 });
 
 test("a task walks workup → implement → review → done, with a Round on failure", async () => {
   const { s, m1 } = seed();
   const t = s.createTask({ milestone_id: m1.id, seq: 1, title: "a" });
-  const verdicts: Verdict[] = ["PASS", "PASS", "FAIL", "PASS", "PASS"];
+  const verdicts: RoutedVerdict[] = ["PASS", "PASS", "FAIL", "PASS", "PASS"];
   let i = 0;
   const seen: string[] = [];
   const executor: StageExecutor = async (_t, stage) => {
     seen.push(stage.name);
     return verdicts[i++] ?? "PASS";
   };
-  while ((await tick(s, { pipeline: THREE_STAGES, executor })).kind === "ran");
+  while ((await tick(s, { pipelineFor: () => THREE_STAGES, executor })).kind === "ran");
   assert.deepEqual(seen, ["workup", "implement", "review", "implement", "review"]);
   const done = s.getTask(t.id);
   assert.equal(done?.status, "done");
@@ -237,11 +254,11 @@ test("a task walks workup → implement → review → done, with a Round on fai
 test("an executor that throws puts the Task back to queued, records stage.crashed and returns an error", async () => {
   const { s, m1 } = seed();
   const t = s.createTask({ milestone_id: m1.id, seq: 1, title: "a" });
-  await tick(s, { pipeline: THREE_STAGES, executor: pass }); // workup passes, the Task is now at implement
+  await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }); // workup passes, the Task is now at implement
   const executor: StageExecutor = async () => {
     throw new Error("runner exploded");
   };
-  assert.deepEqual(await tick(s, { pipeline: THREE_STAGES, executor }), {
+  assert.deepEqual(await tick(s, { pipelineFor: () => THREE_STAGES, executor }), {
     kind: "error",
     task: t.id,
     stage: "implement",
@@ -261,6 +278,34 @@ test("an executor that throws puts the Task back to queued, records stage.crashe
   assert.equal(s.takeLease(t.id, "someone-else", 1000), true);
 });
 
+test("a Verdict the engine cannot route queues the Task and records verdict.unhandled", async () => {
+  const { s, m1 } = seed();
+  const t = s.createTask({ milestone_id: m1.id, seq: 1, title: "a" });
+  await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }); // workup passes, the Task is now at implement
+  for (const verdict of ["BLOCKED", "SCOPE_CHANGE"] as const) {
+    const executor: StageExecutor = async () => verdict;
+    const message = `stage "implement" ended with ${verdict}, which the engine cannot route yet`;
+    assert.deepEqual(await tick(s, { pipelineFor: () => THREE_STAGES, executor }), {
+      kind: "error",
+      task: t.id,
+      stage: "implement",
+      message,
+    });
+    const after = s.getTask(t.id);
+    assert.equal(after?.status, "queued");
+    assert.equal(after?.stage, "implement");
+    assert.equal(after?.round_total, 0);
+    const events = s.listEvents().filter((e) => e.type === "verdict.unhandled");
+    assert.deepEqual(JSON.parse(events.at(-1)?.payload ?? "null"), {
+      stage: "implement",
+      verdict,
+      message,
+    });
+  }
+  assert.equal(s.listEvents().filter((e) => e.type === "stage.completed").length, 1);
+  assert.deepEqual(s.expiredLeases(), []);
+});
+
 test("dependencies are respected and earliest milestone goes first", async () => {
   const { s, m1, m2 } = seed();
   const late = s.createTask({ milestone_id: m2.id, seq: 1, title: "late" });
@@ -272,7 +317,7 @@ test("dependencies are respected and earliest milestone goes first", async () =>
     if (stage.name === "review") order.push(t.id);
     return "PASS";
   };
-  while ((await tick(s, { pipeline: THREE_STAGES, executor })).kind === "ran");
+  while ((await tick(s, { pipelineFor: () => THREE_STAGES, executor })).kind === "ran");
   assert.deepEqual(order, [b.id, a.id, late.id]);
 });
 
@@ -282,7 +327,9 @@ test("a dependency that is not done blocks its dependant", async () => {
   const b = s.createTask({ milestone_id: m1.id, seq: 2, title: "b" });
   s.addDependency(b.id, a.id);
   s.updateTask(a.id, { status: "parked" });
-  assert.deepEqual(await tick(s, { pipeline: THREE_STAGES, executor: pass }), { kind: "idle" });
+  assert.deepEqual(await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }), {
+    kind: "idle",
+  });
 });
 
 test("a dependency that is dropped does not block its dependant", () => {
@@ -295,11 +342,13 @@ test("a dependency that is dropped does not block its dependant", () => {
 });
 
 test("Requests still in planning are not worked", async () => {
-  const s = Store.memory();
+  const s = memoryStore();
   const r = s.createRequest({ title: "r", target_repo: "/r" });
   const m = s.createMilestone({ request_id: r.id, seq: 1, title: "m" });
   s.createTask({ milestone_id: m.id, seq: 1, title: "a" });
-  assert.deepEqual(await tick(s, { pipeline: THREE_STAGES, executor: pass }), { kind: "idle" });
+  assert.deepEqual(await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }), {
+    kind: "idle",
+  });
 });
 
 test("the last Task of a Milestone completes it; the last Milestone completes the Request", async () => {
@@ -308,11 +357,11 @@ test("the last Task of a Milestone completes it; the last Milestone completes th
   s.createTask({ milestone_id: m2.id, seq: 1, title: "b" });
   const completed = [];
   for (
-    let result = await tick(s, { pipeline: THREE_STAGES, executor: pass });
+    let result = await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass });
     result.kind === "ran";
   ) {
     completed.push(result.completed);
-    result = await tick(s, { pipeline: THREE_STAGES, executor: pass });
+    result = await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass });
   }
   assert.deepEqual(completed.slice(0, 2), [
     { milestones: [], request: null },
@@ -343,7 +392,7 @@ test("a Milestone with an open Task does not complete", async () => {
   const { s, r, m1 } = seed();
   s.createTask({ milestone_id: m1.id, seq: 1, title: "a" });
   s.createTask({ milestone_id: m1.id, seq: 2, title: "b" });
-  for (let i = 0; i < 3; i++) await tick(s, { pipeline: THREE_STAGES, executor: pass });
+  for (let i = 0; i < 3; i++) await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass });
   assert.equal(s.getMilestone(m1.id)?.status, "pending");
   assert.equal(s.getRequest(r.id)?.phase, "building");
 });
@@ -352,7 +401,7 @@ test("a Request whose last Task is dropped completes", async () => {
   const { s, r, m1, m2 } = seed();
   s.createTask({ milestone_id: m1.id, seq: 1, title: "a" });
   const b = s.createTask({ milestone_id: m2.id, seq: 1, title: "b" });
-  for (let i = 0; i < 3; i++) await tick(s, { pipeline: THREE_STAGES, executor: pass }); // a: workup, implement, review
+  for (let i = 0; i < 3; i++) await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass }); // a: workup, implement, review
   assert.equal(s.getMilestone(m1.id)?.status, "done");
   assert.equal(s.getRequest(r.id)?.phase, "building");
   assert.deepEqual(dropTask(s, b.id), { milestones: [m2.id], request: r.id });
@@ -366,11 +415,52 @@ test("a Request whose last Task is dropped completes", async () => {
 test("a Task whose Stage is not in the Pipeline is an error and is left untouched", async () => {
   const { s, m1 } = seed();
   const t = s.createTask({ milestone_id: m1.id, seq: 1, title: "a", stage: "deploy" });
-  const result = await tick(s, { pipeline: THREE_STAGES, executor: pass });
+  const result = await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass });
   assert.equal(result.kind, "error");
   assert.match(result.kind === "error" ? result.message : "", /no stage "deploy"/);
   assert.equal(s.getTask(t.id)?.status, "queued");
   assert.deepEqual(s.expiredLeases(), []);
+});
+
+test("a Task whose Stage is not in the Pipeline gets a stage.misconfigured event", async () => {
+  const { s, m1 } = seed();
+  const t = s.createTask({ milestone_id: m1.id, seq: 1, title: "a", stage: "deploy" });
+  const before = s.getTask(t.id);
+  const result = await tick(s, { pipelineFor: () => THREE_STAGES, executor: pass });
+  assert.equal(result.kind, "error");
+  assert.equal(result.kind === "error" ? result.stage : "unset", "deploy");
+  assert.deepEqual(s.getTask(t.id), before);
+  const events = s.listEvents().filter((e) => e.type === "stage.misconfigured");
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.subject, t.id);
+  const payload = JSON.parse(events[0]?.payload ?? "null");
+  assert.equal(payload.stage, "deploy");
+  assert.match(payload.message, /no stage "deploy"/);
+});
+
+test("a Task with no Stage that runs in its lane reports no Stage", async () => {
+  const { s, m1 } = seed();
+  const normalOnly = parsePipeline(
+    `[[stages]]
+name = "a"
+type = "agent"
+on_fail = "a"
+lanes = ["normal"]
+
+[lanes.normal]
+[lanes.fast]
+
+[kinds.default]
+a = ["x"]
+`,
+    {},
+  );
+  const t = s.createTask({ milestone_id: m1.id, seq: 1, title: "a", lane: "fast" });
+  const result = await tick(s, { pipelineFor: () => normalOnly, executor: pass });
+  assert.equal(result.kind, "error");
+  assert.equal(result.kind === "error" ? result.stage : "unset", undefined);
+  assert.equal(s.getTask(t.id)?.status, "queued");
+  assert.equal(s.listEvents().filter((e) => e.type === "stage.misconfigured").length, 1);
 });
 
 test("a fast-lane Task starts at the first Stage that runs in its lane", async () => {
@@ -381,14 +471,6 @@ test("a fast-lane Task starts at the first Stage that runs in its lane", async (
     seen.push(stage.name);
     return "PASS";
   };
-  while ((await tick(s, { pipeline: DEFAULT, executor })).kind === "ran");
-  assert.deepEqual(seen, [
-    "implement",
-    "gates",
-    "review",
-    "verify",
-    "evidence",
-    "task_approval",
-    "research",
-  ]);
+  while ((await tick(s, { pipelineFor: () => FIXTURE, executor })).kind === "ran");
+  assert.deepEqual(seen, ["implement", "gates", "review", "task_approval", "research"]);
 });

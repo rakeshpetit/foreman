@@ -2,19 +2,21 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { type Stage, VERDICTS, type Verdict } from "../engine/route.ts";
+import type { Stage } from "../engine/route.ts";
+import { VERDICTS, type Verdict } from "../engine/verdict.ts";
+import { LANES, type Lane } from "./lane.ts";
 import { MIGRATIONS } from "./schema.ts";
+
+export type { Lane };
 
 export type Mode = "manual" | "auto";
 export type RequestPhase = "planning" | "building" | "done";
 export type TaskStatus = "queued" | "active" | "awaiting_owner" | "parked" | "done" | "dropped";
 export type Origin = "planned" | "research" | "owner";
-export type Lane = "normal" | "fast";
 export type ApprovalKind = "go" | "task" | "milestone" | "amendment" | "consent";
 export type Channel = "cli" | "telegram";
 
 const ORIGINS: readonly Origin[] = ["planned", "research", "owner"];
-const LANES: readonly Lane[] = ["normal", "fast"];
 const APPROVAL_KINDS: readonly ApprovalKind[] = ["go", "task", "milestone", "amendment", "consent"];
 const CHANNELS: readonly Channel[] = ["cli", "telegram"];
 const TASK_STATUSES: readonly TaskStatus[] = [
@@ -264,6 +266,12 @@ export class Store {
       .prepare("SELECT * FROM requests ORDER BY rowid")
       .all() as unknown as RequestRow[];
   }
+  /** The Requests the engine works on: `building`, oldest first. */
+  buildingRequests(): RequestRow[] {
+    return this.db
+      .prepare("SELECT * FROM requests WHERE phase = 'building' ORDER BY rowid")
+      .all() as unknown as RequestRow[];
+  }
   updateRequest(
     id: string,
     patch: Partial<Pick<RequestRow, "mode" | "phase" | "token_budget">>,
@@ -491,6 +499,14 @@ export class Store {
       .prepare("SELECT * FROM events ORDER BY id DESC LIMIT ?")
       .all(limit) as unknown as EventRow[];
     return rows.reverse();
+  }
+
+  /** The newest event of `type` about `subject`, if any. */
+  latestEvent(type: string, subject: string): EventRow | undefined {
+    const row = this.db
+      .prepare("SELECT * FROM events WHERE type = ? AND subject = ? ORDER BY id DESC LIMIT 1")
+      .get(type, subject);
+    return row as unknown as EventRow | undefined;
   }
 
   /** All rows of `table`, or only those whose `column` equals `value` when one is given. */

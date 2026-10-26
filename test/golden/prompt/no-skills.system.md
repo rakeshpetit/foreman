@@ -10,4 +10,4 @@ Write your report to `/work/.foreman/R-1/runs/7-implement.md`. Finish with a Ver
 
 ## Precedents
 
-The Owner's standing decisions are in `/work/.foreman/precedents.md`. Read it before you escalate or ask a question.
+The Owner's standing decisions are in `/work/.foreman/precedents.md`. Read it before returning `BLOCKED`.

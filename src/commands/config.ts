@@ -1,29 +1,6 @@
-import { parseTaskAgents } from "../config/agents.ts";
-import type { RequestOverrides, ResolvedConfig } from "../config/layers.ts";
-import { ConfigError, describeConfig, formatEntries, loadConfig } from "../config/layers.ts";
-import { STUB_GATES } from "../engine/executors.ts";
-import type { RequestRow, Store } from "../store/store.ts";
-
-/** The Request's own settings: its Mode, and the per-Task Agent overrides recorded on its Tasks. */
-function requestOverrides(store: Store, request: RequestRow): RequestOverrides {
-  const requestId = request.id;
-  const taskAgents: NonNullable<RequestOverrides["taskAgents"]> = {};
-  for (const m of store.listMilestones(requestId)) {
-    for (const t of store.listTasks(m.id)) {
-      if (t.agent_overrides !== null) taskAgents[t.id] = parseTaskAgents(t);
-    }
-  }
-  return { id: requestId, mode: request.mode, taskAgents };
-}
-
-/** The Request's config, merged from foreman's defaults, its Target repo and its own overrides. */
-export function resolveConfig(store: Store, request: RequestRow): ResolvedConfig {
-  return loadConfig({
-    targetRepo: request.target_repo,
-    request: requestOverrides(store, request),
-    gates: new Set(Object.keys(STUB_GATES)),
-  });
-}
+import { ConfigError, describeConfig, formatEntries } from "../config/layers.ts";
+import { resolveConfig } from "../config/resolve.ts";
+import type { Store } from "../store/store.ts";
 
 /** `foreman config show R-n [--task T-n]`: the resolved config, one line per key with its source. */
 export function showConfig(store: Store, requestId: string, opts: { task?: string } = {}): string {

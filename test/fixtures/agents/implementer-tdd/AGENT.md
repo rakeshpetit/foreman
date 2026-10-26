@@ -7,7 +7,6 @@ skills:
   preload: [tdd, handoff]
   available: [diagnose]
 output:
-  file: report.md
   verdicts: [PASS, BLOCKED, SCOPE_CHANGE]
 timeout: 45m
 max_tokens: 400000

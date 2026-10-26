@@ -1,18 +1,29 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { agentsFor } from "../src/config/agents.ts";
-import { DEFAULT_PIPELINE_PATH, loadPipeline, parsePipeline } from "../src/config/pipeline.ts";
+import { runEngine } from "../src/commands/run.ts";
+import { parsePipeline } from "../src/config/pipeline.ts";
 import { agentExecutor } from "../src/engine/agent.ts";
-import { gateExecutor, ownerExecutor, STUB_GATES, stageExecutor } from "../src/engine/executors.ts";
+import { gateExecutor, ownerExecutor, stageExecutor } from "../src/engine/executors.ts";
 import { tick } from "../src/engine/tick.ts";
+import { STUB_GATES } from "../src/gates/stub.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
-import { Store } from "../src/store/store.ts";
-import { buildingRequest, removeTmpDirs, tmpDir } from "./helpers.ts";
+import { verdictSchema } from "../src/runner/prompt.ts";
+import type { Runner } from "../src/runner/runner.ts";
+import {
+  buildingRequest,
+  closeStores,
+  fixturePipeline,
+  memoryStore,
+  removeTmpDirs,
+  stubConfig,
+  tmpDir,
+} from "./helpers.ts";
 
 afterEach(removeTmpDirs);
+afterEach(closeStores);
 
 function stageNamed(name: string) {
   const stage = PIPELINE.stages.find((s) => s.name === name);
@@ -22,11 +33,11 @@ function stageNamed(name: string) {
 
 function setup(script: ConstructorParameters<typeof FakeRunner>[0]) {
   const dir = tmpDir("foreman-runner-");
-  const s = new Store(":memory:");
+  const s = memoryStore();
   const { m } = buildingRequest(s, { title: "r", target_repo: join(dir, "work") });
   const t = s.createTask({ milestone_id: m.id, seq: 1, title: "a" });
   const runner = new FakeRunner(script);
-  const executor = agentExecutor({ store: s, runner });
+  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
   return { dir, s, t, runner, executor };
 }
 
@@ -34,21 +45,23 @@ const PIPELINE = parsePipeline(`
 [[stages]]
 name = "workup"
 type = "agent"
-agents = ["writer"]
 on_fail = "workup"
 
 [[stages]]
 name = "implement"
 type = "agent"
-agents = ["coder"]
 on_fail = "implement"
 
 [[stages]]
 name = "review"
 type = "agent"
-agents = ["critic-a", "critic-b"]
 require = "all"
 on_fail = "implement"
+
+[kinds.default]
+workup = ["writer"]
+implement = ["coder"]
+review = ["critic-a", "critic-b"]
 `);
 
 test("FakeRunner writes scripted files, the report and returns usage", async () => {
@@ -67,6 +80,10 @@ test("FakeRunner writes scripted files, the report and returns usage", async () 
     agent: "coder",
     workdir: join(dir, "work"),
     reportPath: join(dir, "reports/T/implement.md"),
+    systemPrompt: "",
+    userPrompt: "",
+    verdictSchema: verdictSchema(["PASS"]),
+    skills: [],
   });
   assert.equal(result.verdict, "PASS");
   assert.deepEqual(result.usage, { input_tokens: 5, output_tokens: 7 });
@@ -76,7 +93,7 @@ test("FakeRunner writes scripted files, the report and returns usage", async () 
 
 test("engine runs a Task through all stub stages with FakeRunner; a scripted fail causes a Round", async () => {
   const { s, t, runner, executor } = setup({ "critic-a": [{ verdict: "FAIL" }] });
-  while ((await tick(s, { pipeline: PIPELINE, executor })).kind === "ran");
+  while ((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind === "ran");
   assert.deepEqual(
     runner.calls.map((c) => [c.stage, c.agent]),
     [
@@ -97,13 +114,13 @@ test("engine runs a Task through all stub stages with FakeRunner; a scripted fai
 
 test("the executor runs each Task in its own Request's repo, not the first building Request's", async () => {
   const dir = tmpDir("foreman-runner-");
-  const s = new Store(":memory:");
+  const s = memoryStore();
   buildingRequest(s, { title: "first", target_repo: join(dir, "first") }, "m1");
   const { m: m2 } = buildingRequest(s, { title: "second", target_repo: join(dir, "second") }, "m2");
   const t = s.createTask({ milestone_id: m2.id, seq: 1, title: "b" });
   const runner = new FakeRunner({});
-  const executor = agentExecutor({ store: s, runner });
-  assert.equal((await tick(s, { pipeline: PIPELINE, executor })).kind, "ran");
+  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
+  assert.equal((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind, "ran");
   assert.deepEqual(
     runner.calls.map((c) => [c.task, c.workdir]),
     [[t.id, join(dir, "second")]],
@@ -127,6 +144,7 @@ test("the executor records each Run with its verdict, usage and report, and the 
   assert.ok(run.report_path && existsSync(run.report_path));
 
   const boom = agentExecutor({
+    config: stubConfig(PIPELINE),
     store: s,
     runner: {
       async run() {
@@ -143,8 +161,8 @@ test("the executor records each Run with its verdict, usage and report, and the 
 
 test('require = "all": one failing reviewer fails the Stage, every reviewer still runs, and it costs a Round', async () => {
   const { s, t, runner } = setup({ "critic-b": [{ verdict: "FAIL" }] });
-  const executor = agentExecutor({ store: s, runner });
-  while ((await tick(s, { pipeline: PIPELINE, executor })).kind === "ran") {
+  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
+  while ((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind === "ran") {
     if (s.getTask(t.id)?.round_total) break;
   }
   const task = s.getTask(t.id);
@@ -167,14 +185,16 @@ test('require = "any": the first PASS ends the Stage; all failing fails it', asy
 [[stages]]
 name = "review"
 type = "agent"
-agents = ["critic-a", "critic-b"]
 require = "any"
 on_fail = "review"
+
+[kinds.default]
+review = ["critic-a", "critic-b"]
 `);
   const stage = any.stages[0];
   assert.ok(stage);
   const { s, t, runner } = setup({ "critic-a": [{ verdict: "PASS" }, { verdict: "FAIL" }] });
-  const executor = agentExecutor({ store: s, runner });
+  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
   const task = s.getTask(t.id);
   assert.ok(task);
   assert.equal(await executor(task, stage), "PASS");
@@ -199,26 +219,46 @@ test("the gate executor runs the named Gates in turn and stops at the first fail
   const { s, t } = setup({});
   const task = s.getTask(t.id);
   assert.ok(task);
-  const stage = loadPipeline(DEFAULT_PIPELINE_PATH, {}).stages.find((x) => x.name === "gates");
+  const stage = fixturePipeline().stages.find((x) => x.name === "gates");
   assert.ok(stage);
   const seen: string[] = [];
-  const record = (name: string, verdict: "PASS" | "FAIL") => () => {
+  const record = (name: string, passed: boolean) => () => {
     seen.push(name);
-    return verdict;
+    return { passed, detail: name };
   };
   assert.equal(await gateExecutor(STUB_GATES)(task, stage), "PASS");
   const registry = {
     ...STUB_GATES,
-    green_after: record("green_after", "PASS"),
-    check_passes: record("check_passes", "FAIL"),
-    test_integrity: record("test_integrity", "PASS"),
+    green_after: record("green_after", true),
+    check_passes: record("check_passes", false),
+    test_integrity: record("test_integrity", true),
   };
   assert.equal(await gateExecutor(registry)(task, stage), "FAIL");
   assert.deepEqual(seen, ["green_after", "check_passes"]);
-  await assert.rejects(
-    gateExecutor({})(task, stage),
-    /stage "gates": no gate "green_after" \(gates: \)/,
+  // Validation has already checked the names, so a Gate missing from the registry just fails.
+  assert.equal(await gateExecutor({})(task, stage), "FAIL");
+});
+
+test("the agent executor gives a Verdict the engine cannot route as the Stage's, and stops", async () => {
+  const { s, t, runner, executor } = setup({
+    "critic-a": [{ verdict: "BLOCKED" }],
+  });
+  const task = s.getTask(t.id);
+  assert.ok(task);
+  assert.equal(await executor(task, stageNamed("review")), "BLOCKED");
+  assert.deepEqual(
+    runner.calls.map((c) => c.agent),
+    ["critic-a"],
   );
+});
+
+test("a BLOCKED Agent Run leaves a verdict.unhandled event and a queued Task", async () => {
+  const { s, t, executor } = setup({ workup: [{ verdict: "BLOCKED" }] });
+  const result = await tick(s, { pipelineFor: () => PIPELINE, executor });
+  assert.equal(result.kind, "error");
+  assert.equal(s.getTask(t.id)?.status, "queued");
+  assert.equal(s.listEvents().filter((e) => e.type === "verdict.unhandled").length, 1);
+  assert.equal(s.listRuns(t.id)[0]?.verdict, "BLOCKED");
 });
 
 test("stageExecutor sends each Stage to the executor for its type; the owner stub approves", async () => {
@@ -237,7 +277,7 @@ test("stageExecutor sends each Stage to the executor for its type; the owner stu
     },
     owner: ownerExecutor,
   });
-  const stages = loadPipeline(DEFAULT_PIPELINE_PATH, {}).stages;
+  const stages = fixturePipeline().stages;
   const of = (type: string) => stages.find((x) => x.type === type);
   const [agent, gate, owner] = [of("agent"), of("gate"), of("owner")];
   assert.ok(agent && gate && owner);
@@ -249,17 +289,19 @@ test("stageExecutor sends each Stage to the executor for its type; the owner stu
 
 test("the executor runs the Agents agentsFor picks for the Task's Kind, and an override wins", async () => {
   const dir = tmpDir("foreman-runner-");
-  const s = new Store(":memory:");
+  const s = memoryStore();
   const { m } = buildingRequest(s, { title: "r", target_repo: join(dir, "work") });
   const pipeline = parsePipeline(`
 [[stages]]
 name = "review"
 type = "agent"
-agents = ["reviewer-standards"]
 on_fail = "review"
 
 [kinds.ui]
 review = ["reviewer-ui"]
+
+[kinds.default]
+review = ["reviewer-standards"]
 `);
   const ui = s.createTask({ milestone_id: m.id, seq: 1, title: "a", kind: "ui", stage: "review" });
   const other = s.createTask({ milestone_id: m.id, seq: 2, title: "b", stage: "review" });
@@ -270,12 +312,11 @@ review = ["reviewer-ui"]
     kind: "ui",
     stage: "review",
   });
-  s.updateTask(chosen.id, { agent_overrides: JSON.stringify({ review: ["reviewer-spec"] }) });
   const runner = new FakeRunner({});
   const executor = agentExecutor({
     store: s,
     runner,
-    agentsFor: (task, stage) => agentsFor(pipeline, task, stage),
+    config: stubConfig(pipeline, ["reviewer-spec"], { [chosen.id]: { review: ["reviewer-spec"] } }),
   });
   const stage = pipeline.stages[0];
   assert.ok(stage);
@@ -291,5 +332,86 @@ review = ["reviewer-ui"]
       [other.id, "reviewer-standards"],
       [chosen.id, "reviewer-spec"],
     ],
+  );
+});
+
+test("an Agent the config does not load fails the Run, which records the error", async () => {
+  const { s, t, runner } = setup({});
+  const task = s.getTask(t.id);
+  assert.ok(task);
+  const executor = agentExecutor({
+    store: s,
+    runner,
+    config: { ...stubConfig(PIPELINE), agents: new Map() },
+  });
+  await assert.rejects(executor(task, stageNamed("workup")), /unknown agent "writer"/);
+  assert.equal(runner.calls.length, 0);
+  assert.match(s.listRuns(t.id)[0]?.error ?? "", /unknown agent "writer"/);
+});
+
+/** A building Request with one Task, and a second Request, still planning, with its own `.foreman/config.toml`. */
+function twoRequests(secondConfig: string) {
+  const dir = tmpDir("foreman-midrun-");
+  const s = memoryStore();
+  const first = buildingRequest(s, { title: "one", target_repo: join(dir, "one") });
+  const t1 = s.createTask({ milestone_id: first.m.id, seq: 1, title: "a" });
+
+  const repo2 = join(dir, "two");
+  const agentDir = join(repo2, ".foreman", "agents", "custom-impl");
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(
+    join(agentDir, "AGENT.md"),
+    "---\noutput:\n  verdicts: [PASS, FAIL]\n---\nRole prompt for {{task.id}}.\n",
+  );
+  writeFileSync(join(repo2, ".foreman", "config.toml"), secondConfig);
+  const r2 = s.createRequest({ title: "two", target_repo: repo2 });
+  const m2 = s.createMilestone({ request_id: r2.id, seq: 1, title: "m" });
+  const t2 = s.createTask({ milestone_id: m2.id, seq: 1, title: "b", kind: "special" });
+
+  // The second Request starts building while the first Request's first Stage runs.
+  const fake = new FakeRunner();
+  let started = false;
+  const runner: Runner = {
+    run: async (spec) => {
+      if (!started) {
+        started = true;
+        s.updateRequest(r2.id, { phase: "building" });
+      }
+      return fake.run(spec);
+    },
+  };
+  return { dir, s, t1, t2, fake, runner };
+}
+
+test("a Request that starts building mid-run runs its Task with its own Target repo's Kinds", async () => {
+  const w = twoRequests('[kinds.special]\nimplement = ["custom-impl"]\n');
+  const results = await runEngine(w.s, { home: w.dir, untilIdle: true, runner: w.runner });
+  assert.deepEqual(results.at(-1), { kind: "idle" });
+  assert.ok(w.s.listTasks().every((t) => t.status === "done"));
+  const agentAt = (task: string) =>
+    w.fake.calls.filter((c) => c.task === task && c.stage === "implement").map((c) => c.agent);
+  assert.deepEqual(agentAt(w.t1.id), ["implementer-tdd"]);
+  assert.deepEqual(agentAt(w.t2.id), ["custom-impl"]);
+});
+
+test("a broken config found mid-run is a tick error with a stage.misconfigured event", async () => {
+  const w = twoRequests('[kinds.special]\nimplement = ["no-such-agent"]\n');
+  const results = await runEngine(w.s, { home: w.dir, untilIdle: true, runner: w.runner });
+  const last = results.at(-1);
+  assert.equal(last?.kind, "error");
+  assert.match(last?.kind === "error" ? last.message : "", /no-such-agent/);
+  const event = w.s.listEvents().find((e) => e.type === "stage.misconfigured");
+  assert.equal(event?.subject, w.t2.id);
+  assert.equal(w.s.getTask(w.t2.id)?.status, "queued");
+  assert.equal(w.s.getTask(w.t1.id)?.status, "done");
+});
+
+test("runEngine looks up no Task or Request", () => {
+  const source = readFileSync(join(import.meta.dirname, "../src/commands/run.ts"), "utf8");
+  const body = source.slice(source.indexOf("export async function runEngine"));
+  const end = body.indexOf("\n}\n");
+  assert.doesNotMatch(
+    body.slice(0, end),
+    /nextActionable|requestIdOf|getRequest|getMilestone|getTask|listTasks|listRequests/,
   );
 });

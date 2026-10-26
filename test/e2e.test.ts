@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { main } from "../src/cli/main.ts";
+import { loadAgent } from "../src/config/agent.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
 import { Store } from "../src/store/store.ts";
 import { FakeNtfy } from "./fakes/ntfy/server.ts";
-import { FIXTURE_PLAN, removeTmpDirs, tmpDir } from "./helpers.ts";
+import { cli, FIXTURE_PLAN, REPO_ROOT, removeTmpDirs } from "./helpers.ts";
 
 afterEach(removeTmpDirs);
 
@@ -17,23 +17,17 @@ test("tracer: import → go → run --until-idle on the default Pipeline, with a
   const ntfy = new FakeNtfy();
   const server = await ntfy.start();
   try {
-    const root = tmpDir("foreman-e2e-");
-    const home = join(root, "home");
-    const out: string[] = [];
-    const run = (...argv: string[]) =>
-      main(argv, {
-        env: { FOREMAN_HOME: home, FOREMAN_NTFY_SERVER: server, FOREMAN_NTFY_TOPIC: "foreman" },
-        cwd: root,
-        out: (l) => out.push(l),
-        err: (l) => out.push(l),
-        runner: new FakeRunner({
-          "implementer-tdd": [{ verdict: "PASS", usage: { input_tokens: 5, output_tokens: 6 } }],
-          "reviewer-standards": [
-            { verdict: "FAIL", usage: { input_tokens: 11, output_tokens: 22 } },
-            { verdict: "PASS", usage: { input_tokens: 33, output_tokens: 44 } },
-          ],
-        }),
-      });
+    const runner = new FakeRunner({
+      "implementer-tdd": [{ verdict: "PASS", usage: { input_tokens: 5, output_tokens: 6 } }],
+      "reviewer-standards": [
+        { verdict: "FAIL", usage: { input_tokens: 11, output_tokens: 22 } },
+        { verdict: "PASS", usage: { input_tokens: 33, output_tokens: 44 } },
+      ],
+    });
+    const { root, home, run } = cli({
+      env: { FOREMAN_NTFY_SERVER: server, FOREMAN_NTFY_TOPIC: "foreman" },
+      runner,
+    });
 
     assert.equal(await run("import", root, FIXTURE_PLAN), 0);
     assert.equal(await run("go", "R-1"), 0);
@@ -131,6 +125,31 @@ test("tracer: import → go → run --until-idle on the default Pipeline, with a
     }
 
     assert.match(readFileSync(join(home, "STATUS.md"), "utf8"), /Phase: done/);
+    // Every Run is built from its Agent's AGENT.md, and a Round's rework reads the failed report.
+    assert.equal(runner.calls.length, 27);
+    for (const spec of runner.calls) {
+      const { body } = loadAgent(join(REPO_ROOT, "agents", spec.agent, "AGENT.md"));
+      assert.ok(spec.systemPrompt.startsWith(body.trim().split("\n")[0] ?? ""), spec.agent);
+      assert.doesNotMatch(spec.systemPrompt, /\{\{/);
+      assert.deepEqual(spec.verdictSchema.properties.verdict.enum.includes("PASS"), true);
+    }
+    const ofT1 = runner.calls.filter((c) => c.task === "T-1");
+    const implements_ = ofT1.filter((c) => c.stage === "implement");
+    assert.equal(implements_.length, 2);
+    assert.doesNotMatch(implements_[0]?.userPrompt ?? "", /Blocking findings/);
+    const rework = implements_[1]?.userPrompt ?? "";
+    assert.match(rework, /## Blocking findings from the last Round/);
+    assert.match(rework, /\(reviewer-standards\) # review report\n\n {2}verdict: FAIL/);
+    assert.doesNotMatch(rework, /reviewer-spec\)/);
+    assert.match(
+      rework,
+      /## Earlier reports for this Task[\s\S]*review \(reviewer-standards, FAIL\)/,
+    );
+    // The Stage after the rework sees those reports as history, not as findings to fix.
+    const secondReview = ofT1.filter((c) => c.stage === "review").slice(2);
+    assert.equal(secondReview.length, 2);
+    assert.ok(secondReview.every((c) => !c.userPrompt.includes("Blocking findings")));
+
     const titles = ntfy.calls.map((c) => c.title);
     assert.ok(titles.includes("Request done: R-1"));
     assert.equal(titles.filter((t) => t?.startsWith("Task done")).length, 4);
@@ -145,21 +164,16 @@ function targetConfig(root: string, toml: string): void {
   writeFileSync(join(root, ".foreman", "config.toml"), toml);
 }
 
-function cli() {
-  const root = tmpDir("foreman-e2e-");
-  const home = join(root, "home");
-  const out: string[] = [];
-  const err: string[] = [];
-  const runner = new FakeRunner();
-  const run = (...argv: string[]) =>
-    main(argv, {
-      env: { FOREMAN_HOME: home },
-      cwd: root,
-      out: (l) => out.push(l),
-      err: (l) => err.push(l),
-      runner,
-    });
-  return { root, home, out, err, run, runner };
+/** Stub Agents in the Target repo's `.foreman/agents/`, for the names its config or overrides use. */
+function targetAgents(root: string, ...names: string[]): void {
+  for (const name of names) {
+    const dir = join(root, ".foreman", "agents", name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "AGENT.md"),
+      "---\nmodel: sonnet\noutput:\n  verdicts: [PASS, FAIL]\n---\nStub role prompt.\n",
+    );
+  }
 }
 
 test("Kinds route to different Agents, and an override recorded at Go wins", async () => {
@@ -175,9 +189,10 @@ implement = ["implementer-cli"]
 review = ["reviewer-standards", "reviewer-cli"]
 `,
   );
+  targetAgents(root, "implementer-core", "implementer-cli", "reviewer-cli", "reviewer-override");
   assert.equal(await run("import", root, FIXTURE_PLAN), 0);
   assert.equal(await run("go", "R-1"), 0);
-  // What Go records for a Task the Owner gave its own Agents (M5-T08 adds the flag).
+  // What Go records for a Task the Owner gave its own Agents (M7-T06 adds the flag).
   const seed = Store.open(home);
   try {
     seed.updateTask("T-4", { agent_overrides: JSON.stringify({ review: ["reviewer-override"] }) });
@@ -230,10 +245,29 @@ for (const [name, toml, message] of [
     `[[stages]]
 name = "implement"
 type = "agent"
-agents = ["implementer-tdd"]
 on_fail = "nowhere"
+
+[kinds.default]
+implement = ["implementer-tdd"]
 `,
     /nowhere/,
+  ],
+  [
+    "a typo in the default Kind's agents",
+    `[[stages]]
+name = "implement"
+type = "agent"
+on_fail = "implement"
+
+[kinds.default]
+implement = ["implemnter-tdd"]
+`,
+    /kinds\.default\.implement: unknown agent "implemnter-tdd" \(known: .*implementer-tdd/,
+  ],
+  [
+    "an unknown agent in a Kind",
+    '[kinds.core]\nimplement = ["implemnter-core"]\n',
+    /kinds\.core\.implement: unknown agent "implemnter-core"/,
   ],
   ["TOML that does not parse", "[[stages]\n", /\.foreman\/config\.toml: not valid TOML/],
   ["an unknown top-level key", 'pipeline = "x"\n', /unknown key "pipeline"/],
@@ -255,6 +289,41 @@ on_fail = "nowhere"
     }
   });
 }
+
+test("run refuses to start on a per-Task override naming an unknown Agent", async () => {
+  const { root, home, run, err, runner } = cli();
+  assert.equal(await run("import", root, FIXTURE_PLAN), 0);
+  assert.equal(await run("go", "R-1"), 0);
+  const seed = Store.open(home);
+  try {
+    seed.updateTask("T-2", { agent_overrides: JSON.stringify({ review: ["reviewer-nobody"] }) });
+  } finally {
+    seed.close();
+  }
+  assert.equal(await run("run", "--until-idle"), 1);
+  assert.match(
+    err.join("\n"),
+    /task T-2: stage "review": unknown agent "reviewer-nobody" \(known: .*reviewer-spec/,
+  );
+  assert.equal(runner.calls.length, 0);
+});
+
+test("run refuses to start on a malformed per-Task agent_overrides, naming the Task", async () => {
+  const { root, home, run, err, runner } = cli();
+  assert.equal(await run("import", root, FIXTURE_PLAN), 0);
+  assert.equal(await run("go", "R-1"), 0);
+  const seed = Store.open(home);
+  try {
+    seed.updateTask("T-2", { agent_overrides: '{"review": "reviewer-spec"}' });
+  } finally {
+    seed.close();
+  }
+  assert.equal(await run("run", "--until-idle"), 1);
+  assert.match(err.join("\n"), /T-2: agent_overrides is not a/);
+  assert.equal(runner.calls.length, 0);
+  assert.equal(await run("config", "show", "R-1"), 1);
+  assert.match(err.at(-1) ?? "", /T-2: agent_overrides is not a/);
+});
 
 test("a broken config does not stop `run` on a Request that is not building", async () => {
   const { root, run } = cli();

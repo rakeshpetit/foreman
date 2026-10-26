@@ -6,12 +6,20 @@ import { afterEach, test } from "node:test";
 import { type ImportFs, importPlan } from "../src/importer/import.ts";
 import { ImportError, parseTasks } from "../src/importer/parse.ts";
 import { Store } from "../src/store/store.ts";
-import { FIXTURE_PLAN, REPO_ROOT, removeTmpDirs, tmpDir } from "./helpers.ts";
+import {
+  closeStores,
+  FIXTURE_PLAN,
+  memoryStore,
+  REPO_ROOT,
+  removeTmpDirs,
+  tmpDir,
+} from "./helpers.ts";
 
 afterEach(removeTmpDirs);
+afterEach(closeStores);
 
 test("imports the fixture plan: milestones, tasks, kinds, sizes, dependencies and files", () => {
-  const store = Store.memory();
+  const store = memoryStore();
   const repo = tmpDir("target-");
   const res = importPlan(store, repo, FIXTURE_PLAN);
   assert.deepEqual(res, { requestId: "R-1", milestones: 2, tasks: 4 });
@@ -38,7 +46,7 @@ test("imports the fixture plan: milestones, tasks, kinds, sizes, dependencies an
 });
 
 test("this repo's docs/plan/TASKS.md imports cleanly (M1-T02)", () => {
-  const store = Store.memory();
+  const store = memoryStore();
   assert.equal(
     importPlan(store, tmpDir("target-"), join(REPO_ROOT, "docs", "plan")).requestId,
     "R-1",
@@ -136,7 +144,7 @@ test("duplicate ID fails with the line number", () => {
 });
 
 test("a failed import writes nothing", () => {
-  const store = Store.memory();
+  const store = memoryStore();
   const dir = tmpDir("plan-");
   assert.throws(() => importPlan(store, dir, dir));
   assert.equal(store.listRequests().length, 0);
@@ -154,7 +162,7 @@ const ls = (repo: string) =>
   existsSync(join(repo, ".foreman")) ? readdirSync(join(repo, ".foreman")) : null;
 
 test("a file write that fails leaves no Request rows and no files", () => {
-  const store = Store.memory();
+  const store = memoryStore();
   const repo = tmpDir("target-");
   for (const op of ["writeFileSync", "renameSync"] as const) {
     assert.throws(
@@ -178,15 +186,19 @@ test("a transaction that fails after the files are in place leaves no files", ()
     }
   }
   const store = new FailsAtCommit(":memory:");
-  store.armed = true;
-  const repo = tmpDir("target-");
-  assert.throws(() => importPlan(store, repo, FIXTURE_PLAN), /commit failed/);
-  assert.deepEqual(store.listRequests(), []);
-  assert.equal(ls(repo), null);
+  try {
+    store.armed = true;
+    const repo = tmpDir("target-");
+    assert.throws(() => importPlan(store, repo, FIXTURE_PLAN), /commit failed/);
+    assert.deepEqual(store.listRequests(), []);
+    assert.equal(ls(repo), null);
+  } finally {
+    store.close();
+  }
 });
 
 test("a failed import keeps a .foreman/ that was already there, with its contents", () => {
-  const store = Store.memory();
+  const store = memoryStore();
   const repo = tmpDir("target-");
   nodeFs.mkdirSync(join(repo, ".foreman"));
   nodeFs.writeFileSync(join(repo, ".foreman", "config.toml"), 'check = "npm run check"\n');
@@ -195,7 +207,7 @@ test("a failed import keeps a .foreman/ that was already there, with its content
 });
 
 test("a Task's file_path comes from its own ID", () => {
-  const store = Store.memory();
+  const store = memoryStore();
   const repo = tmpDir("target-");
   importPlan(store, repo, FIXTURE_PLAN);
   for (const t of store.listTasks()) {

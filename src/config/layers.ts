@@ -4,6 +4,7 @@ import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
 import type { Mode } from "../store/store.ts";
 import { type Agent, loadAgent } from "./agent.ts";
+import { ConfigFileError, unknownName } from "./issues.ts";
 import { type Pipeline, validatePipeline } from "./pipeline.ts";
 import { FOREMAN_DIR, skillRoots } from "./skill.ts";
 
@@ -24,7 +25,7 @@ const DEFAULT_MODE: Mode = "manual";
 
 /** The Target repo's commands, as set in its `.foreman/config.toml`. */
 export type Commands = Partial<Omit<z.output<typeof settingsSchema>, "mode">>;
-/** Stage name → the Agents for it, replacing the Stage's own for one Task. */
+/** Stage name → the Agents for it, replacing the Kind's choice for one Task. */
 export type TaskAgents = Record<string, string[]>;
 
 /** What the Owner chose for one Request, normally at Go. The top layer. */
@@ -42,11 +43,6 @@ export interface ConfigInput {
   foremanDir?: string;
   /** Every Gate name that exists, to catch a typo in `gates`. Unchecked when absent. */
   gates?: ReadonlySet<string>;
-  /**
-   * Check that every Agent a Stage names exists. Off until foreman ships its own Agent library,
-   * since its default Pipeline names Agents that do not exist yet.
-   */
-  strictAgents?: boolean;
 }
 
 export interface LoadedAgent {
@@ -74,15 +70,7 @@ export interface ResolvedConfig {
 }
 
 /** Every problem with the config layers, one readable line each (`issues`). */
-export class ConfigError extends Error {
-  readonly issues: string[];
-
-  constructor(issues: string[]) {
-    super(issues.join("\n"));
-    this.name = "ConfigError";
-    this.issues = issues;
-  }
-}
+export class ConfigError extends ConfigFileError {}
 
 type Table = Record<string, unknown>;
 
@@ -123,10 +111,10 @@ export function loadConfig(input: ConfigInput): ResolvedConfig {
   const pipeline = validatePipeline(pipelineRaw, {
     source: "merged config",
     gates: input.gates,
-    agents: input.strictAgents ? new Set(agents.keys()) : undefined,
+    agents: new Set(agents.keys()),
   });
   const taskAgents = request?.taskAgents ?? {};
-  checkTaskAgents(pipeline, taskAgents, request, input.strictAgents ? agents : undefined);
+  checkTaskAgents(pipeline, taskAgents, request, agents);
 
   const out: Record<string, string> = Object.fromEntries(sources);
   out.mode = modeSource;
@@ -163,7 +151,7 @@ function readLayer(path: string, label: string): Table | undefined {
   const known: string[] = [...PIPELINE_KEYS, ...SETTING_KEYS];
   const issues = Object.keys(raw)
     .filter((k) => !known.includes(k))
-    .map((k) => `${label}: unknown key "${k}" (known: ${known.join(", ")})`);
+    .map((k) => `${label}: ${unknownName("key", k, known)}`);
   const settings = settingsSchema
     .partial()
     .safeParse(Object.fromEntries(Object.entries(raw).filter(([k]) => SETTING_KEYS.includes(k))));
@@ -243,7 +231,7 @@ function checkTaskAgents(
   pipeline: Pipeline,
   taskAgents: Record<string, TaskAgents>,
   request: RequestOverrides | undefined,
-  known: ReadonlyMap<string, unknown> | undefined,
+  known: ReadonlyMap<string, unknown>,
 ): void {
   const issues: string[] = [];
   const stages = new Map(pipeline.stages.map((s) => [s.name, s]));
@@ -255,8 +243,12 @@ function checkTaskAgents(
         issues.push(`${at}: "${stage}" is not a stage (stages: ${[...stages.keys()].join(", ")})`);
       } else if (s.type !== "agent") {
         issues.push(`${at}: "${stage}" is a ${s.type} stage, so it has no agents to choose`);
-      } else if (known) {
-        for (const a of agents) if (!known.has(a)) issues.push(`${at}: unknown agent "${a}"`);
+      } else {
+        for (const a of agents) {
+          if (!known.has(a)) {
+            issues.push(`${at}: stage "${stage}": ${unknownName("agent", a, known.keys())}`);
+          }
+        }
       }
     }
   }

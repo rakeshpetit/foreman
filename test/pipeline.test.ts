@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, it } from "node:test";
 import {
   DEFAULT_PIPELINE_PATH,
   loadPipeline,
   PipelineError,
   parsePipeline,
+  type StageConfig,
 } from "../src/config/pipeline.ts";
+import { removeTmpDirs, tmpDir } from "./helpers.ts";
 
-/** Every Agent the default Pipeline names. The Agent files arrive in M5-T10 and M10-T07. */
+/** Every Agent the default Pipeline names. foreman's `agents/` holds a stub for each. */
 const DEFAULT_AGENTS = new Set([
   "workup-tdd",
   "implementer-tdd",
@@ -21,27 +25,31 @@ const DEFAULT_AGENTS = new Set([
   "researcher-task",
 ]);
 
+afterEach(removeTmpDirs);
+
 const AGENTS = new Set(["writer", "coder", "critic-a", "critic-b"]);
 
 const VALID = `
 [[stages]]
 name = "workup"
 type = "agent"
-agents = ["writer"]
 on_fail = "workup"
 
 [[stages]]
 name = "implement"
 type = "agent"
-agents = ["coder"]
 on_fail = "implement"
 
 [[stages]]
 name = "review"
 type = "agent"
-agents = ["critic-a", "critic-b"]
 require = "all"
 on_fail = "implement"
+
+[kinds.default]
+workup = ["writer"]
+implement = ["coder"]
+review = ["critic-a", "critic-b"]
 `;
 
 function issuesOfOpts(text: string, opts: Parameters<typeof parsePipeline>[1]): string[] {
@@ -76,7 +84,9 @@ describe("parsePipeline", () => {
       ],
     );
     assert.deepEqual(p.breaker, { per_stage: 3, per_task: 6 });
-    assert.deepEqual(p.kinds, {});
+    assert.deepEqual(p.kinds, {
+      default: { workup: ["writer"], implement: ["coder"], review: ["critic-a", "critic-b"] },
+    });
     assert.equal(p.notify.usage, "task");
   });
 
@@ -118,7 +128,8 @@ under_lines = 30
     assert.deepEqual(gates?.gates, ["check_passes", "diff_size"]);
     assert.deepEqual(gates?.lanes, ["normal", "fast"]);
     assert.equal(p.stages.find((s) => s.name === "approve")?.max_rounds, 2);
-    assert.deepEqual(p.kinds, { ui: { review: ["critic-b"] } });
+    assert.deepEqual(p.kinds.ui, { review: ["critic-b"] });
+    assert.deepEqual(Object.keys(p.kinds), ["default", "ui"]);
     assert.deepEqual(p.breaker, { per_stage: 2, per_task: 5 });
     assert.deepEqual(p.notify, { usage: "off", events: ["request_done"] });
     assert.deepEqual(p.lanes, { normal: {}, fast: { under_lines: 30 } });
@@ -151,17 +162,14 @@ on_fail = "implement"
 
   it("rejects an unknown Agent and lists the known ones", () => {
     const [issue] = issuesOf(VALID.replace('"writer"', '"wirter"'));
-    assert.match(issue ?? "", /stage "workup"/);
+    assert.match(issue ?? "", /kinds\.default\.workup/);
     assert.match(issue ?? "", /unknown agent "wirter"/);
     assert.match(issue ?? "", /coder, critic-a, critic-b, writer/);
   });
 
   it("rejects a pass path that loops with no way out", () => {
     const issues = issuesOf(
-      VALID.replace(
-        'agents = ["critic-a", "critic-b"]',
-        'agents = ["critic-a", "critic-b"]\non_pass = "workup"',
-      ),
+      VALID.replace('require = "all"', 'require = "all"\non_pass = "workup"'),
     );
     assert.equal(issues.length, 1);
     assert.match(issues[0] ?? "", /cycle/);
@@ -197,17 +205,17 @@ on_fail = "implement"
     );
   });
 
-  it("requires agents on agent stages and gates on gate stages, and forbids the wrong ones", () => {
-    const noAgents = issuesOf(VALID.replace('agents = ["writer"]\n', "")).join("\n");
-    assert.match(noAgents, /stage "workup".*agents/);
+  it("requires a default Kind entry for every agent stage, gates on gate stages, and forbids the wrong ones", () => {
+    const noAgents = issuesOf(VALID.replace('workup = ["writer"]\n', "")).join("\n");
+    assert.match(noAgents, /stage "workup": .*\[kinds\.default\].*workup = \["name"\]/);
     const gateNoGates = issuesOf(
       `${VALID}\n[[stages]]\nname = "g"\ntype = "gate"\non_fail = "implement"\n`,
     ).join("\n");
     assert.match(gateNoGates, /stage "g".*gates/);
-    const gateWithAgents = issuesOf(
+    const stageWithAgents = issuesOf(
       `${VALID}\n[[stages]]\nname = "g"\ntype = "gate"\ngates = ["x"]\nagents = ["coder"]\non_fail = "implement"\n`,
     ).join("\n");
-    assert.match(gateWithAgents, /stage "g".*agents.*only for agent stages/);
+    assert.match(stageWithAgents, /stages\[3\]\.agents: .*\[kinds\.default\]/);
     const ownerWithGates = issuesOf(
       `${VALID}\n[[stages]]\nname = "o"\ntype = "owner"\ngates = ["x"]\non_fail = "implement"\n`,
     ).join("\n");
@@ -242,6 +250,41 @@ on_fail = "implement"
       ).join("\n"),
       /stage "review": lane "fast" is not declared in \[lanes\]/,
     );
+  });
+
+  it("rejects a lane foreman does not have, in the types and in a stage's lanes", () => {
+    const stage: StageConfig = {
+      name: "a",
+      type: "agent",
+      require: "all",
+      on_pass: "done",
+      on_fail: "a",
+      // @ts-expect-error "slow" is not a Lane
+      lanes: ["slow"],
+    };
+    assert.deepEqual(stage.lanes, ["slow"]);
+    assert.match(
+      issuesOf(VALID.replace('require = "all"', 'require = "all"\nlanes = ["slow"]')).join("\n"),
+      /lanes/,
+    );
+  });
+
+  it("rejects an on_fail target that does not run in every lane its stage runs in", () => {
+    const stage = (name: string, onFail: string, lanes?: string) =>
+      `[[stages]]\nname = "${name}"\ntype = "agent"\non_fail = "${onFail}"\n${lanes ? `lanes = ${lanes}\n` : ""}`;
+    const lanes =
+      '\n[lanes.normal]\n[lanes.fast]\n[kinds.default]\nimplement = ["coder"]\nreview = ["coder"]\n';
+    // An all-lanes review fails to a normal-only implement: a fast Task would land on a skipped Stage.
+    const bad = `${stage("implement", "implement", '["normal"]')}\n${stage("review", "implement")}${lanes}`;
+    assert.match(
+      issuesOf(bad).join("\n"),
+      /stage "review": on_fail "implement" does not run in the fast lane, which "review" runs in/,
+    );
+    // Fine when the failing Stage runs only in lanes its target runs in, or the target runs in all.
+    const narrow = `${stage("implement", "implement", '["normal"]')}\n${stage("review", "implement", '["normal"]')}${lanes}`;
+    assert.doesNotThrow(() => parsePipeline(narrow));
+    const wide = `${stage("implement", "implement")}\n${stage("review", "implement", '["fast"]')}${lanes}`;
+    assert.doesNotThrow(() => parsePipeline(wide));
   });
 
   it("rejects unknown keys, so a typo is not silently ignored", () => {
@@ -291,7 +334,8 @@ on_fail = "implement"
 });
 
 describe("defaults/pipeline.toml", () => {
-  const pipeline = loadPipeline(DEFAULT_PIPELINE_PATH, { agents: DEFAULT_AGENTS });
+  // No `agents` given: `loadPipeline` checks the names against foreman's own `agents/`.
+  const pipeline = loadPipeline(DEFAULT_PIPELINE_PATH);
 
   it("validates", () => {
     assert.ok(pipeline.stages.length > 0);
@@ -316,7 +360,6 @@ describe("defaults/pipeline.toml", () => {
 
   it("uses every Agent it names, and uses only those", () => {
     const named = new Set<string>();
-    for (const s of pipeline.stages) for (const a of s.agents ?? []) named.add(a);
     for (const stages of Object.values(pipeline.kinds))
       for (const agents of Object.values(stages)) for (const a of agents) named.add(a);
     assert.deepEqual([...named].sort(), [...DEFAULT_AGENTS].sort());
@@ -324,9 +367,14 @@ describe("defaults/pipeline.toml", () => {
 
   it("has several reviewers that must all pass, and the ADR 0006 Breaker limits", () => {
     const review = pipeline.stages.find((s) => s.name === "review");
-    assert.deepEqual(review?.agents, ["reviewer-standards", "reviewer-spec"]);
+    assert.deepEqual(pipeline.kinds.default?.review, ["reviewer-standards", "reviewer-spec"]);
     assert.equal(review?.require, "all");
     assert.deepEqual(pipeline.breaker, { per_stage: 3, per_task: 6 });
+  });
+
+  it("names the Agents of every agent stage under [kinds.default]", () => {
+    const agentStages = pipeline.stages.filter((s) => s.type === "agent").map((s) => s.name);
+    assert.deepEqual(Object.keys(pipeline.kinds.default ?? {}).sort(), agentStages.sort());
   });
 
   it("sends a failed Workup back to Workup (ADR 0010) and a failed review back to Implement", () => {
@@ -340,5 +388,23 @@ describe("defaults/pipeline.toml", () => {
     const by = Object.fromEntries(pipeline.stages.map((s) => [s.name, s]));
     assert.deepEqual(by.workup?.lanes, ["normal"]);
     assert.deepEqual(by.red?.lanes, ["normal"]);
+  });
+});
+
+describe("loadPipeline", () => {
+  it("checks the Agent names against foreman's own agents/", () => {
+    const path = join(tmpDir("foreman-pipeline-"), "pipeline.toml");
+    writeFileSync(
+      path,
+      '[[stages]]\nname = "implement"\ntype = "agent"\non_fail = "implement"\n[kinds.default]\nimplement = ["implementer-tdd", "implemnter"]\n',
+    );
+    assert.throws(
+      () => loadPipeline(path),
+      (e) =>
+        e instanceof PipelineError &&
+        /kinds\.default\.implement: unknown agent "implemnter" \(known: .*implementer-tdd/.test(
+          e.message,
+        ),
+    );
   });
 });

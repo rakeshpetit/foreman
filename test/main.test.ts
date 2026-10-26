@@ -12,7 +12,7 @@ test("version reads package.json", () => {
   assert.match(version(), /^\d+\.\d+\.\d+$/);
 });
 
-function cli() {
+function cli(foremanDir?: string) {
   const root = tmpDir("foreman-cli-");
   const home = join(root, "home");
   const plan = join(root, "plan");
@@ -41,6 +41,7 @@ function cli() {
       cwd: root,
       out: (l) => out.push(l),
       err: (l) => err.push(l),
+      foremanDir,
     });
   return { root, home, plan, fake, out, err, run };
 }
@@ -241,7 +242,7 @@ test("run --fake with an unknown Verdict or Stage or Agent fails and leaves ever
   await run("import", root, plan);
   await run("go", "R-1");
   for (const [script, why] of [
-    [{ review: [{ verdict: "pass" }] }, /verdict must be one of PASS, FAIL/],
+    [{ review: [{ verdict: "pass" }] }, /verdict must be one of PASS, FAIL, BLOCKED, SCOPE_CHANGE/],
     [{ deploy: [] }, /unknown stage or agent "deploy"/],
   ] as const) {
     writeFileSync(fake, JSON.stringify(script));
@@ -353,4 +354,22 @@ test("config show names the file of a broken Target repo config", async () => {
   await run("import", root, plan);
   assert.equal(await run("config", "show", "R-1"), 1);
   assert.match(err.at(-1) ?? "", /\.foreman\/config\.toml: not valid TOML/);
+});
+
+test("run refuses to start when foreman's defaults/pipeline.toml is broken, naming the error", async () => {
+  const foremanDir = tmpDir("foreman-broken-");
+  mkdirSync(join(foremanDir, "defaults"));
+  writeFileSync(join(foremanDir, "defaults", "pipeline.toml"), "[[stages]\nname = \n");
+  const { run, plan, root, err, fake, home } = cli(foremanDir);
+  await run("import", root, plan);
+  await run("go", "R-1");
+  assert.equal(await run("run", "--until-idle", "--fake", fake), 1);
+  assert.match(err.join("\n"), /defaults\/pipeline\.toml: not valid TOML/);
+  const store = Store.open(home);
+  try {
+    assert.ok(store.listTasks().every((t) => t.status === "queued"));
+    assert.equal(store.listRuns().length, 0);
+  } finally {
+    store.close();
+  }
 });

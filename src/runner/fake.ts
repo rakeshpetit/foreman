@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { VERDICTS, type Verdict } from "../engine/route.ts";
+import { unknownName } from "../config/issues.ts";
+import { VERDICTS, type Verdict } from "../engine/verdict.ts";
 import type { Runner, RunResult, RunSpec, Usage } from "./runner.ts";
 
 export interface FakeStep {
@@ -18,25 +19,27 @@ export type FakeScript = Record<string, FakeStep[]>;
 
 const NO_USAGE: Usage = { input_tokens: 0, output_tokens: 0 };
 
-/** Checks a script read from JSON: only `known` Stage and Agent names, and every step has a Verdict foreman knows. */
-export function parseFakeScript(json: unknown, known: ReadonlySet<string>): FakeScript {
+/**
+ * Checks a script read from JSON: only `known` Stage and Agent names (any, when `known` is absent),
+ * and every step has a Verdict foreman knows.
+ */
+export function parseFakeScript(json: unknown, known?: ReadonlySet<string>): FakeScript {
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
     throw new Error("a script is an object of Stage or Agent → steps");
   }
+  const script: FakeScript = {};
   for (const [stage, steps] of Object.entries(json)) {
-    if (!known.has(stage)) {
-      throw new Error(
-        `unknown stage or agent ${JSON.stringify(stage)} (known: ${[...known].sort().join(", ")})`,
-      );
+    if (known && !known.has(stage)) {
+      throw new Error(unknownName("stage or agent", stage, known));
     }
     if (!Array.isArray(steps)) throw new Error(`${stage}: steps must be an array`);
-    for (const step of steps) {
-      if (!(VERDICTS as readonly unknown[]).includes(step?.verdict)) {
-        throw new Error(`${stage}: verdict must be one of ${VERDICTS.join(", ")}`);
-      }
-    }
+    script[stage] = steps.map((step) => {
+      const verdict = VERDICTS.find((v) => v === step?.verdict);
+      if (!verdict) throw new Error(`${stage}: verdict must be one of ${VERDICTS.join(", ")}`);
+      return { ...step, verdict };
+    });
   }
-  return json as FakeScript;
+  return script;
 }
 
 export class FakeRunner implements Runner {

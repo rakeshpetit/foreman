@@ -35,5 +35,7 @@ Nothing is built until the Owner has approved a Spec, Plan and Tasks. After that
 
 ## Consequences
 
+- **Not built yet (M2):** the default Pipeline's `task_approval` owner Stage runs in every Mode for now, and its stub Owner auto-approves. M5-T02 must give the schema a way to make an owner Stage depend on Mode, so `task_approval` runs in Manual Mode only. M5-T03 re-runs the Gate Stages after the Owner pushes their own commits to the Task branch, which needs a route from `task_approval` back to the Gates.
+
 - In Manual Mode the queue stops after every Task until the Owner replies, so throughput is bound to the Owner's attention.
 - Unapproved work exists on GitHub as pushed Milestone branches.

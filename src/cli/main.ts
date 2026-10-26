@@ -2,16 +2,9 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { showConfig } from "../commands/config.ts";
-import { resolvePipelines, runEngine } from "../commands/run.ts";
-import { AgentError } from "../config/agent.ts";
-import { ConfigError } from "../config/layers.ts";
-import {
-  DEFAULT_PIPELINE_PATH,
-  loadPipeline,
-  type Pipeline,
-  PipelineError,
-} from "../config/pipeline.ts";
-import { STUB_GATES } from "../engine/executors.ts";
+import { resolveConfigs, runEngine } from "../commands/run.ts";
+import { ConfigFileError } from "../config/issues.ts";
+import { scriptNames } from "../config/pipeline.ts";
 import { importPlan } from "../importer/import.ts";
 import { ImportError } from "../importer/parse.ts";
 import { ntfyFromConfig } from "../notify/config.ts";
@@ -35,6 +28,8 @@ export interface Context {
   err: (line: string) => void;
   runner?: Runner;
   notifier?: Notifier;
+  /** foreman's own checkout, for `loadConfig` (default: this one). A test seam. */
+  foremanDir?: string;
 }
 
 const HELP = `foreman ${version()}
@@ -94,14 +89,7 @@ export async function main(argv: string[], ctx: Context): Promise<number> {
     return code;
   } catch (e) {
     // Expected failures are one line (ImportError already carries "line N:"); anything else keeps its stack.
-    if (
-      e instanceof ImportError ||
-      e instanceof PipelineError ||
-      e instanceof ConfigError ||
-      e instanceof AgentError
-    ) {
-      return fail(ctx, e.message);
-    }
+    if (e instanceof ImportError || e instanceof ConfigFileError) return fail(ctx, e.message);
     if (e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT") {
       return fail(ctx, e.message);
     }
@@ -146,16 +134,19 @@ async function dispatch(
     }
     case "run": {
       // Resolve every building Request's config first: a broken one refuses the whole run.
-      const pipeline = loadPipeline(DEFAULT_PIPELINE_PATH, {
-        gates: new Set(Object.keys(STUB_GATES)),
-      });
-      const pipelines = resolvePipelines(store);
+      const configs = resolveConfigs(store, ctx.foremanDir);
       let runner = ctx.runner;
       if (!runner && values.fake !== undefined) {
         try {
           const json: unknown = JSON.parse(readFileSync(resolve(ctx.cwd, values.fake), "utf8"));
           runner = new FakeRunner(
-            parseFakeScript(json, scriptNames([pipeline, ...pipelines.values()])),
+            parseFakeScript(
+              json,
+              // With no building Request there is nothing to check the names against, and nothing will run.
+              configs.size > 0
+                ? scriptNames([...configs.values()].map((c) => c.pipeline))
+                : undefined,
+            ),
           );
         } catch (e) {
           const why = e instanceof Error ? e.message : String(e);
@@ -173,15 +164,17 @@ async function dispatch(
         home,
         untilIdle: values["until-idle"] ?? false,
         runner,
-        pipeline,
-        pipelines,
+        configs,
+        foremanDir: ctx.foremanDir,
         notifier,
       });
       const ran = results.filter((r) => r.kind === "ran").length;
       ctx.out(`Ran ${ran} stage${ran === 1 ? "" : "s"}`);
       const crashed = results.find((r) => r.kind === "error");
-      if (crashed)
-        return fail(ctx, `${crashed.task} crashed in ${crashed.stage}: ${crashed.message}`);
+      if (crashed) {
+        const where = crashed.stage ? ` in ${crashed.stage}` : "";
+        return fail(ctx, `${crashed.task} crashed${where}: ${crashed.message}`);
+      }
       return 0;
     }
     case "config": {
@@ -206,21 +199,6 @@ async function dispatch(
     default:
       return fail(ctx, `Unknown command: ${command}`);
   }
-}
-
-/** The names a `--fake` script may key its steps by: every Stage and every Agent in the Pipelines. */
-function scriptNames(pipelines: Pipeline[]): Set<string> {
-  const names = new Set<string>();
-  for (const pipeline of pipelines) {
-    for (const s of pipeline.stages) {
-      names.add(s.name);
-      for (const a of s.agents ?? []) names.add(a);
-    }
-    for (const byStage of Object.values(pipeline.kinds)) {
-      for (const agents of Object.values(byStage)) for (const a of agents) names.add(a);
-    }
-  }
-  return names;
 }
 
 function parse(argv: string[]) {

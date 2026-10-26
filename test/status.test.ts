@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import { afterEach, test } from "node:test";
 import { render, writeStatus } from "../src/status/status.ts";
-import { Store } from "../src/store/store.ts";
-import { buildingRequest, removeTmpDirs, tmpDir } from "./helpers.ts";
+import { buildingRequest, closeStores, memoryStore, removeTmpDirs, tmpDir } from "./helpers.ts";
 
 afterEach(removeTmpDirs);
+afterEach(closeStores);
 
 function mixed() {
-  const s = Store.memory();
+  const s = memoryStore();
   s.now = () => new Date("2026-01-01T00:00:00Z");
   const { r, m: m1 } = buildingRequest(
     s,

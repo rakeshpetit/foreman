@@ -7,7 +7,6 @@ const FIXTURE = join(import.meta.dirname, "fixtures/agents/implementer-tdd/AGENT
 
 const MINIMAL = `---
 output:
-  file: report.md
   verdicts: [PASS, FAIL]
 ---
 Do the work.
@@ -32,10 +31,7 @@ describe("loadAgent", () => {
     assert.equal(a.image, "foreman-base");
     assert.deepEqual(a.tools, ["Read", "Edit", "Write", "Bash"]);
     assert.deepEqual(a.skills, { preload: ["tdd", "handoff"], available: ["diagnose"] });
-    assert.deepEqual(a.output, {
-      file: "report.md",
-      verdicts: ["PASS", "BLOCKED", "SCOPE_CHANGE"],
-    });
+    assert.deepEqual(a.output, { verdicts: ["PASS", "BLOCKED", "SCOPE_CHANGE"] });
     assert.equal(a.timeout, "45m");
     assert.equal(a.max_tokens, 400000);
     assert.match(a.body.trim(), /^# Implementer/);
@@ -68,7 +64,7 @@ describe("parseAgent", () => {
 
   it("rejects an unknown template variable, naming the file and the line", () => {
     const e = errorOf(`${MINIMAL}\nSee {{task.colour}}.\n`);
-    assert.match(e.message, /^agents\/x\/AGENT\.md: line 8: unknown variable "task\.colour"/);
+    assert.match(e.message, /^agents\/x\/AGENT\.md: line 7: unknown variable "task\.colour"/);
     assert.match(e.message, /task\.id/, "lists what is known");
   });
 
@@ -87,14 +83,28 @@ describe("parseAgent", () => {
     parseAgent(`${MINIMAL}${vars.join("\n")}\n`, { source: "a/AGENT.md" });
   });
 
-  it("rejects duplicate or lower-case Verdicts", () => {
+  it("rejects a duplicate Verdict", () => {
     assert.match(errorOf(MINIMAL.replace("[PASS, FAIL]", "[PASS, PASS]")).message, /once/);
-    assert.match(errorOf(MINIMAL.replace("[PASS, FAIL]", "[pass]")).message, /capitals/);
   });
 
-  it("rejects an output file outside the report directory", () => {
-    assert.match(errorOf(MINIMAL.replace("report.md", "../report.md")).message, /output\.file/);
-    assert.match(errorOf(MINIMAL.replace("report.md", "/etc/report.md")).message, /output\.file/);
+  it("rejects a Verdict foreman does not know, naming the file and the known Verdicts", () => {
+    for (const bad of ["MAYBE", "pass"]) {
+      const e = errorOf(MINIMAL.replace("[PASS, FAIL]", `[PASS, ${bad}]`));
+      assert.match(e.message, /^agents\/x\/AGENT\.md: output\.verdicts\[1\]: /);
+      assert.match(e.message, /PASS, FAIL, BLOCKED, SCOPE_CHANGE/);
+    }
+  });
+
+  it("rejects an Output contract without PASS, naming the file", () => {
+    const e = errorOf(MINIMAL.replace("[PASS, FAIL]", "[FAIL, BLOCKED]"));
+    assert.match(e.message, /^agents\/x\/AGENT\.md: output\.verdicts: list PASS/);
+  });
+
+  it("rejects output.file: foreman chooses where each Run's report goes", () => {
+    assert.match(
+      errorOf(MINIMAL.replace("output:\n", "output:\n  file: report.md\n")).message,
+      /file/,
+    );
   });
 
   it("checks timeout is a duration", () => {
@@ -125,7 +135,7 @@ describe("parseAgent", () => {
   });
 
   it("reports every problem at once", () => {
-    const e = errorOf(`---\noutput:\n  file: ""\n  verdicts: []\n---\n{{nope.x}}\n`);
+    const e = errorOf(`---\nmax_tokens: 0\noutput:\n  verdicts: []\n---\n{{nope.x}}\n`);
     assert.ok(e.issues.length >= 3, e.message);
   });
 
@@ -134,6 +144,6 @@ describe("parseAgent", () => {
       errorOf(MINIMAL.replace("---\nDo", "max_tokens: 0\n---\nDo")).message,
       /max_tokens/,
     );
-    assert.match(errorOf("---\noutput: {file: r.md, verdicts: [PASS]}\n---\n  \n").message, /body/);
+    assert.match(errorOf("---\noutput: {verdicts: [PASS]}\n---\n  \n").message, /body/);
   });
 });

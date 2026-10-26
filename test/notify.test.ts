@@ -8,9 +8,8 @@ import { engineError, notifySafely, requestDone, taskDone } from "../src/notify/
 import { NtfyNotifier } from "../src/notify/ntfy.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
 import type { Runner } from "../src/runner/runner.ts";
-import { Store } from "../src/store/store.ts";
 import { FakeNtfy } from "./fakes/ntfy/server.ts";
-import { buildingRequest, defaultPipeline, removeTmpDirs, tmpDir } from "./helpers.ts";
+import { buildingRequest, closeStores, memoryStore, removeTmpDirs, tmpDir } from "./helpers.ts";
 
 const fake = new FakeNtfy();
 let url: string;
@@ -21,6 +20,7 @@ before(async () => {
 });
 after(() => fake.stop());
 afterEach(removeTmpDirs);
+afterEach(closeStores);
 
 test("records title, priority, tags and body for Task done, Request done and engine error", async () => {
   fake.calls.length = 0;
@@ -65,7 +65,7 @@ test("an ntfy failure is logged, never thrown", async () => {
 });
 
 function seed() {
-  const store = Store.memory();
+  const store = memoryStore();
   const { m } = buildingRequest(store, {
     title: "r",
     target_repo: tmpDir("foreman-notify-repo-"),
@@ -105,7 +105,6 @@ test("a hung ntfy server delays a tick by no more than the timeout, and the fail
     const results = await runEngine(seed(), {
       home: dir,
       untilIdle: true,
-      pipeline: defaultPipeline(),
       runner: new FakeRunner(),
       notifier,
     });
@@ -154,7 +153,6 @@ usage_topic = "usage-topic"
   await runEngine(seed(), {
     home: dir,
     untilIdle: true,
-    pipeline: defaultPipeline(),
     runner: new FakeRunner(),
     notifier: ntfyFromConfig(dir, {}),
   });
@@ -176,7 +174,6 @@ test("a Runner that throws sends one engine-error ping, rewrites STATUS.md, stop
   const results = await runEngine(store, {
     home: dir,
     untilIdle: true,
-    pipeline: defaultPipeline(),
     runner,
     notifier,
   });

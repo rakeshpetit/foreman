@@ -2,14 +2,15 @@
 # `.foreman/`, and a Request can override Agents at Go.
 #
 # Each stage is an `agent`, a `gate` or an `owner` stage. `on_pass` defaults to the next stage
-# (`done` after the last). `on_fail` is always explicit. The Agents named here come from the Agent
-# library (M5-T10, M10-T07). The Gates are registered by M2-T02 and built in M4.
+# (`done` after the last). `on_fail` is always explicit. A stage never names its Agents: they come
+# from `[kinds.*]` below, and `[kinds.default]` names them for every agent stage (ADR 0011). The
+# Agents come from the Agent library (M5-T10, M10-T07). The Gates are registered by M2-T02 and
+# built in M4.
 
 # Workup writes the acceptance test. A failed Workup goes back to Workup and costs a Round (ADR 0010).
 [[stages]]
 name = "workup"
 type = "agent"
-agents = ["workup-tdd"]
 on_fail = "workup"
 lanes = ["normal"]
 
@@ -24,7 +25,6 @@ lanes = ["normal"]
 [[stages]]
 name = "implement"
 type = "agent"
-agents = ["implementer-tdd"]
 on_fail = "implement"
 
 [[stages]]
@@ -36,14 +36,12 @@ on_fail = "implement"
 [[stages]]
 name = "review"
 type = "agent"
-agents = ["reviewer-standards", "reviewer-spec"]
 require = "all"
 on_fail = "implement"
 
 [[stages]]
 name = "verify"
 type = "agent"
-agents = ["verifier-api"]
 on_fail = "implement"
 
 [[stages]]
@@ -62,10 +60,17 @@ on_fail = "implement"
 [[stages]]
 name = "research"
 type = "agent"
-agents = ["researcher-task"]
 on_fail = "research"
 
-# Kind -> Stage -> Agents. These replace the stage's own `agents` for Tasks of that Kind.
+# Kind -> Stage -> Agents. `[kinds.default]` names the Agents of every agent stage. A Task of any
+# other Kind gets that Kind's entry for a stage where it has one, and the `default` entry otherwise.
+[kinds.default]
+workup = ["workup-tdd"]
+implement = ["implementer-tdd"]
+review = ["reviewer-standards", "reviewer-spec"]
+verify = ["verifier-api"]
+research = ["researcher-task"]
+
 [kinds.ui]
 implement = ["implementer-ui"]
 verify = ["verifier-web-playwright"]

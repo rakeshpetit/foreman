@@ -1,8 +1,12 @@
 import { DONE, type Pipeline, type StageConfig } from "../config/pipeline.ts";
 import { isSettled, type Store, type TaskRow } from "../store/store.ts";
-import { enter, route, type Stage, stageOf, type Transition, type Verdict } from "./route.ts";
+import { enter, route, type Stage, stageOf, type Transition } from "./route.ts";
+import { isRouted, type RoutedVerdict, type Verdict } from "./verdict.ts";
 
-/** Does the work of one Stage for one Task and says whether it passed. Throws if it cannot run. */
+/**
+ * Does the work of one Stage for one Task and says whether it passed. Throws if it cannot run.
+ * It may give a Verdict the engine cannot route yet, which `tick` treats as an error.
+ */
 export type StageExecutor = (task: TaskRow, stage: StageConfig) => Promise<Verdict>;
 
 /** What finished because a Task settled: Milestone ids, and the Request id once its last Milestone is done. */
@@ -18,15 +22,20 @@ export type TickResult =
       kind: "ran";
       task: string;
       stage: Stage;
-      verdict: Verdict;
+      verdict: RoutedVerdict;
       transition: Transition;
       completed: Completed;
     }
-  /** The executor threw. The Task is back to `queued` at the same Stage and the engine should stop. */
-  | { kind: "error"; task: string; stage: Stage; message: string };
+  /**
+   * The engine should stop. The executor threw or gave a Verdict the engine cannot route, so the
+   * Task is back to `queued` at the same Stage; or the config is broken or no longer fits the Task, so it is
+   * untouched and `stage` is the Stage it was at, if any.
+   */
+  | { kind: "error"; task: string; stage?: Stage; message: string };
 
 export interface TickOptions {
-  pipeline: Pipeline;
+  /** The Pipeline that runs `task`. May throw, if the Task's config is broken: that is a tick error. */
+  pipelineFor: (task: TaskRow) => Pipeline;
   executor: StageExecutor;
   holder?: string;
   leaseMs?: number;
@@ -40,7 +49,7 @@ export function nextActionable(store: Store): TaskRow | undefined {
       .filter((t) => isSettled(t.status))
       .map((t) => t.id),
   );
-  for (const req of store.listRequests().filter((r) => r.phase === "building")) {
+  for (const req of store.buildingRequests()) {
     for (const m of store.listMilestones(req.id)) {
       const task = store
         .listTasks(m.id)
@@ -67,16 +76,20 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
   }
   store.addEvent("lease.taken", task.id, { holder });
   try {
+    let pipeline: Pipeline;
     let stage: Stage;
     let config: StageConfig;
     try {
-      stage = task.stage ?? enter(opts.pipeline, opts.pipeline.stages[0]?.name ?? DONE, task.lane);
+      pipeline = opts.pipelineFor(task);
+      stage = task.stage ?? enter(pipeline, pipeline.stages[0]?.name ?? DONE, task.lane);
       if (stage === DONE) throw new Error(`no stage runs in the ${task.lane} lane`);
-      config = stageOf(opts.pipeline, stage);
+      config = stageOf(pipeline, stage);
     } catch (e) {
-      // The config no longer fits the Task. Leave it untouched for the Owner to fix the config.
+      // The config is broken or no longer fits the Task. Leave it untouched for the Owner to fix the config.
       const message = e instanceof Error ? e.message : String(e);
-      return { kind: "error", task: task.id, stage: task.stage ?? "", message };
+      const at = task.stage ?? undefined;
+      store.addEvent("stage.misconfigured", task.id, { stage: at, message });
+      return { kind: "error", task: task.id, stage: at, message };
     }
     store.transaction(() => {
       store.updateTask(task.id, { status: "active", stage });
@@ -94,7 +107,16 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
       });
       return { kind: "error", task: task.id, stage, message };
     }
-    const transition = route(opts.pipeline, stage, verdict, task);
+    if (!isRouted(verdict)) {
+      // BLOCKED and SCOPE_CHANGE have no route until M5-T06 and M5-T08. Treat them as a crash.
+      const message = `stage "${stage}" ended with ${verdict}, which the engine cannot route yet`;
+      store.transaction(() => {
+        store.updateTask(task.id, { status: "queued", stage });
+        store.addEvent("verdict.unhandled", task.id, { stage, verdict, message });
+      });
+      return { kind: "error", task: task.id, stage, message };
+    }
+    const transition = route(pipeline, stage, verdict, task);
     const completed = apply(store, task, stage, verdict, transition);
     return { kind: "ran", task: task.id, stage, verdict, transition, completed };
   } finally {
@@ -107,7 +129,7 @@ function apply(
   store: Store,
   task: TaskRow,
   stage: Stage,
-  verdict: Verdict,
+  verdict: RoutedVerdict,
   transition: Transition,
 ): Completed {
   return store.transaction(() => {

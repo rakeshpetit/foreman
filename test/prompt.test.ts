@@ -44,13 +44,11 @@ skills:
   preload: [tdd, handoff]
   available: [diagnose]
 output:
-  file: report.md
   verdicts: [PASS, BLOCKED, SCOPE_CHANGE]
 timeout: 45m
 max_tokens: 400000`);
 
 const NO_SKILLS = agent(`output:
-  file: report.md
   verdicts: [PASS, FAIL]`);
 
 const SKILLS = {
@@ -104,7 +102,7 @@ const REPORTS: PriorReport[] = [
   },
 ];
 const FINDINGS: BlockingFinding[] = [
-  { from: "reviewer-code", text: "parse() swallows the error from JSON.parse.\n" },
+  { from: { agent: "reviewer-code" }, text: "parse() swallows the error from JSON.parse.\n" },
   { from: "owner", text: "Name the function parseTask, not parse.\nUpdate every caller." },
 ];
 
@@ -180,9 +178,5 @@ describe("renderTemplate", () => {
       { ...i, task: { ...i.task, branch: null } },
     );
     assert.equal(out, `M1-T02|${PATHS.task}||normal|manual|/repo|/work|${PATHS.precedents}`);
-  });
-
-  it("rejects a variable the parser would not have allowed", () => {
-    assert.throws(() => renderTemplate("{{task.nope}}", input()), /unknown template variable/);
   });
 });

@@ -115,7 +115,7 @@ This file is also the input format for `foreman import` (M1-T02). From M6 on, fo
 
 ### M2-T03 · AGENT.md parser
 - **Kind:** core · **Size:** S · **Depends:** M0-T01
-- **Do:** Frontmatter schema: `model`, `effort`, `image`, `tools`, `skills.preload`, `skills.available`, `output.file`, `output.verdicts`, `timeout`, `max_tokens`. The body is a template with `{{task.*}}`, `{{request.*}}` and `{{paths.*}}` variables.
+- **Do:** Frontmatter schema: `model`, `effort`, `image`, `tools`, `skills.preload`, `skills.available`, `output.verdicts`, `timeout`, `max_tokens`. The body is a template with `{{task.*}}`, `{{request.*}}` and `{{paths.*}}` variables.
 - **Done when:** a fixture Agent parses, and an unknown variable or an empty Verdict list is an error that names the file.
 
 ### M2-T04 · Skill resolution

@@ -1,5 +1,7 @@
-import { type Agent, TEMPLATE_VARIABLES } from "../config/agent.ts";
+import type { Agent } from "../config/agent.ts";
 import type { ResolvedSkills } from "../config/skill.ts";
+import type { Stage } from "../engine/route.ts";
+import type { Verdict } from "../engine/verdict.ts";
 import type { RequestRow, TaskRow } from "../store/store.ts";
 import type { RunSpec, VerdictSchema } from "./runner.ts";
 
@@ -19,14 +21,14 @@ export interface PromptPaths {
 export interface PriorReport {
   stage: string;
   agent: string;
-  verdict: string;
+  verdict: Verdict;
   path: string;
 }
 
 /** Something the last Round's review, Gate or Owner said must change, before the Task can pass. */
 export interface BlockingFinding {
-  /** Who raised it: a Stage or Agent name, or "owner". */
-  from: string;
+  /** Who raised it: a Stage (a Gate), an Agent, or the Owner. */
+  from: { stage: Stage } | { agent: string } | "owner";
   text: string;
 }
 
@@ -43,10 +45,6 @@ export interface RunSpecInput {
   findings?: BlockingFinding[];
 }
 
-/** A `RunSpec` with everything prompt assembly fills in. */
-export type AssembledRunSpec = RunSpec &
-  Required<Pick<RunSpec, "systemPrompt" | "userPrompt" | "verdictSchema" | "skills">>;
-
 /**
  * Builds the `RunSpec` for one Run of `agent`.
  *
@@ -54,7 +52,7 @@ export type AssembledRunSpec = RunSpec &
  * to the Precedents file. The user prompt is the Task: its files, earlier reports and the findings
  * to fix. The Verdict schema allows exactly the Verdicts the Agent's Output contract lists.
  */
-export function assembleRunSpec(input: RunSpecInput): AssembledRunSpec {
+export function assembleRunSpec(input: RunSpecInput): RunSpec {
   const { agent, skills, task, stage, paths } = input;
   return {
     task: task.id,
@@ -75,7 +73,7 @@ export function assembleRunSpec(input: RunSpecInput): AssembledRunSpec {
   };
 }
 
-export function verdictSchema(verdicts: string[]): VerdictSchema {
+export function verdictSchema(verdicts: Verdict[]): VerdictSchema {
   return {
     type: "object",
     properties: { verdict: { type: "string", enum: verdicts } },
@@ -106,7 +104,7 @@ function systemPrompt({ agent, skills, task, request, paths }: RunSpecInput): st
     `## Output contract\n\nWrite your report to \`${paths.report}\`. Finish with a Verdict, one of: ${verdicts}.`,
   );
   sections.push(
-    `## Precedents\n\nThe Owner's standing decisions are in \`${paths.precedents}\`. Read it before you escalate or ask a question.`,
+    `## Precedents\n\nThe Owner's standing decisions are in \`${paths.precedents}\`. Read it before returning \`BLOCKED\`.`,
   );
   return `${sections.join("\n\n")}\n`;
 }
@@ -133,35 +131,41 @@ function userPrompt({ task, stage, paths, reports = [], findings = [] }: RunSpec
       "Fix every one of these before you finish.",
       "",
     );
-    for (const f of findings) lines.push(`- (${f.from}) ${f.text.trim().replace(/\n/g, "\n  ")}`);
+    for (const f of findings)
+      lines.push(`- (${findingSource(f.from)}) ${f.text.trim().replace(/\n(?=.)/g, "\n  ")}`);
   }
   return `${lines.join("\n")}\n`;
 }
 
-type Values = {
-  task: RunSpecInput["task"];
-  request: RunSpecInput["request"];
-  paths: PromptPaths;
-};
+function findingSource(from: BlockingFinding["from"]): string {
+  if (from === "owner") return from;
+  return "stage" in from ? from.stage : from.agent;
+}
 
-/** Fills in each `{{namespace.key}}` of an AGENT.md body. An unset value (no branch yet) is empty. */
-export function renderTemplate(body: string, values: Values): string {
+/** What an AGENT.md body may name: the Task, the Request and the paths, as `{{task.id}}` and so on. */
+export type TemplateValues = Pick<RunSpecInput, "task" | "request" | "paths">;
+
+/**
+ * Fills in each `{{namespace.key}}` of an AGENT.md body. An unset value (no branch yet) is empty.
+ * The body is a parsed Agent's, so every variable in it is one that exists.
+ */
+export function renderTemplate(body: string, values: TemplateValues): string {
   const table: Record<string, Record<string, string | null>> = {
     task: { ...values.task, file: values.paths.task },
     request: { ...values.request },
     paths: { ...values.paths },
   };
-  return body.replace(/\{\{\s*([a-z_]+)\.([a-z_]+)\s*\}\}/g, (match, ns: string, key: string) => {
-    const known = (TEMPLATE_VARIABLES as Record<string, readonly string[]>)[ns];
-    if (!known?.includes(key)) throw new Error(`unknown template variable ${match}`);
-    return table[ns]?.[key] ?? "";
-  });
+  return body.replace(
+    /\{\{\s*([a-z_]+)\.([a-z_]+)\s*\}\}/g,
+    (_match, ns: string, key: string) => table[ns]?.[key] ?? "",
+  );
 }
 
-const UNIT_MS = { s: 1_000, m: 60_000, h: 3_600_000 } as const;
+const UNIT_MS: Record<string, number> = { s: 1_000, m: 60_000, h: 3_600_000 };
 
 /** `45m` → 2_700_000. The AGENT.md parser has already checked the shape. */
 function durationMs(duration: string): number {
-  const unit = duration.slice(-1) as keyof typeof UNIT_MS;
-  return Number(duration.slice(0, -1)) * UNIT_MS[unit];
+  const unitMs = UNIT_MS[duration.slice(-1)];
+  if (unitMs === undefined) throw new Error(`unknown duration unit in "${duration}"`);
+  return Number(duration.slice(0, -1)) * unitMs;
 }

@@ -1,7 +1,9 @@
-import { readFileSync } from "node:fs";
-import { basename, dirname, isAbsolute } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { VERDICTS } from "../engine/verdict.ts";
+import { ConfigFileError, formatPath, stripBom, unknownName } from "./issues.ts";
 
 /**
  * The variables an AGENT.md body may use, as `{{namespace.key}}`. Prompt assembly (M2-T05) fills
@@ -15,7 +17,6 @@ export const TEMPLATE_VARIABLES = {
 
 const names = z.array(z.string().min(1));
 
-const VERDICT = /^[A-Z][A-Z0-9_]*$/;
 const KNOWN_VARIABLES = Object.entries(TEMPLATE_VARIABLES).flatMap(([ns, keys]) =>
   keys.map((k) => `${ns}.${k}`),
 );
@@ -27,17 +28,12 @@ const agentSchema = z.strictObject({
   tools: names.optional(),
   skills: z.strictObject({ preload: names.default([]), available: names.default([]) }).prefault({}),
   output: z.strictObject({
-    /** The file the Agent writes its report to, relative to its report directory. */
-    file: z
-      .string()
-      .min(1)
-      .refine((f) => !isAbsolute(f) && !f.split(/[\\/]/).includes(".."), {
-        message: "use a path inside the report directory, with no leading / and no ..",
-      }),
     verdicts: z
-      .array(z.string().regex(VERDICT, "write a Verdict in capitals, e.g. SCOPE_CHANGE"))
-      .min(1, "list at least one Verdict, e.g. [PASS]")
-      .refine((v) => new Set(v).size === v.length, { message: "list each Verdict once" }),
+      .array(z.enum(VERDICTS, `use a Verdict foreman knows: ${VERDICTS.join(", ")}`))
+      .refine((v) => new Set(v).size === v.length, { message: "list each Verdict once" })
+      .refine((v) => v.includes("PASS"), {
+        message: "list PASS: the Agent must be able to pass its Stage, e.g. [PASS, FAIL]",
+      }),
   }),
   /** A duration: a number and a unit of `s`, `m` or `h`, e.g. `45m`. */
   timeout: z
@@ -61,23 +57,21 @@ export interface AgentOptions {
 }
 
 /** Every problem with an AGENT.md, one readable line each (`issues`), prefixed by its file. */
-export class AgentError extends Error {
-  readonly issues: string[];
-
-  constructor(issues: string[], source: string) {
-    super(issues.map((i) => `${source}: ${i}`).join("\n"));
-    this.name = "AgentError";
-    this.issues = issues;
-  }
-}
+export class AgentError extends ConfigFileError {}
 
 export function loadAgent(path: string): Agent {
   return parseAgent(readFileSync(path, "utf8"), { source: path });
 }
 
+/** The names of the Agents in an `agents/` folder: its subfolders that hold an AGENT.md. */
+export function agentNames(dir: string): Set<string> {
+  if (!existsSync(dir)) return new Set();
+  return new Set(readdirSync(dir).filter((name) => existsSync(join(dir, name, "AGENT.md"))));
+}
+
 /** Parses and validates an AGENT.md. Throws an `AgentError` listing every problem. */
 export function parseAgent(text: string, { source }: AgentOptions): Agent {
-  const split = splitFrontmatter(text.replace(/^\uFEFF/, ""));
+  const split = splitFrontmatter(stripBom(text));
   if (!split) {
     throw new AgentError(
       ["no frontmatter: start the file with a `---` block holding model, output and so on"],
@@ -94,7 +88,8 @@ export function parseAgent(text: string, { source }: AgentOptions): Agent {
   const issues: string[] = [];
   const shape = agentSchema.safeParse(raw);
   if (!shape.success) {
-    for (const i of shape.error.issues) issues.push(`${formatPath(i.path)}: ${i.message}`);
+    for (const i of shape.error.issues)
+      issues.push(`${formatPath(i.path, "frontmatter")}: ${i.message}`);
   }
   if (split.body.trim() === "") issues.push("body: the role prompt is empty");
   issues.push(...checkVariables(split.body, split.bodyLine));
@@ -110,14 +105,6 @@ export function splitFrontmatter(text: string) {
   return { frontmatter: m[1] ?? "", body: text.slice(m[0].length), bodyLine };
 }
 
-function formatPath(path: PropertyKey[]): string {
-  let out = "";
-  for (const part of path) {
-    out += typeof part === "number" ? `[${part}]` : out ? `.${String(part)}` : String(part);
-  }
-  return out || "frontmatter";
-}
-
 /** Every `{{ }}` in the body must name a known variable. A `{{` with no `}}` is an error too. */
 function checkVariables(body: string, firstLine: number): string[] {
   const issues: string[] = [];
@@ -130,9 +117,7 @@ function checkVariables(body: string, firstLine: number): string[] {
     if (!/^[a-z_]+\.[a-z_]+$/.test(name)) {
       issues.push(`${lineAt(m.index)}: "{{${m[1]}}}" is not a variable, use {{namespace.key}}`);
     } else if (!KNOWN_VARIABLES.includes(name)) {
-      issues.push(
-        `${lineAt(m.index)}: unknown variable "${name}" (known: ${KNOWN_VARIABLES.join(", ")})`,
-      );
+      issues.push(`${lineAt(m.index)}: ${unknownName("variable", name, KNOWN_VARIABLES)}`);
     }
   }
   if (body.split("{{").length - 1 !== closed) {

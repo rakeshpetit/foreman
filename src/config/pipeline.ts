@@ -2,29 +2,54 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { z } from "zod";
+import { LANES, type Lane } from "../store/lane.ts";
+import { agentNames } from "./agent.ts";
+import { ConfigFileError, formatPath, unknownName } from "./issues.ts";
+import { FOREMAN_DIR } from "./skill.ts";
 
 /** The end of the Pipeline: where `on_pass` leads from the last Stage. Not a Stage name. */
 export const DONE = "done";
+
+/** The Kind that names the Agents of every agent Stage, for a Task whose own Kind leaves one out (ADR 0011). */
+export const DEFAULT_KIND = "default";
 
 export const DEFAULT_PIPELINE_PATH = join(import.meta.dirname, "../../defaults/pipeline.toml");
 
 const STAGE_TYPES = ["agent", "gate", "owner"] as const;
 const NOTIFY_EVENTS = ["task_done", "request_done", "engine_error"] as const;
-const LANES = ["normal", "fast"] as const;
 
 const names = z.array(z.string().min(1)).min(1);
 
-const stageSchema = z.strictObject({
-  name: z.string().regex(/^[a-z][a-z0-9_-]*$/, "use lowercase letters, digits, - and _"),
-  type: z.enum(STAGE_TYPES),
-  agents: names.optional(),
-  require: z.enum(["all", "any"]).optional(),
-  gates: names.optional(),
-  on_pass: z.string().optional(),
-  on_fail: z.string().optional(),
-  max_rounds: z.int().positive().optional(),
-  lanes: names.optional(),
-});
+const stageSchema = z
+  .strictObject({
+    name: z.string().regex(/^[a-z][a-z0-9_-]*$/, "use lowercase letters, digits, - and _"),
+    type: z.enum(STAGE_TYPES),
+    // Agents live under `kinds`, never on a Stage (ADR 0011). Named so the message says where to go.
+    agents: z
+      .never({
+        error:
+          'a stage has no agents of its own; list them under [kinds.default], e.g. name = ["agent"]',
+      })
+      .optional(),
+    require: z.enum(["all", "any"]).optional(),
+    gates: names.optional(),
+    on_pass: z.string().optional(),
+    on_fail: z.string().optional(),
+    max_rounds: z.int().positive().optional(),
+    lanes: z.array(z.enum(LANES)).min(1).optional(),
+  })
+  // Named here, not by path, so the message says which Stage; this also types `on_fail` as present.
+  .transform(({ on_fail, ...s }, ctx) => {
+    if (on_fail === undefined) {
+      ctx.issues.push({
+        code: "custom",
+        input: s,
+        message: `on_fail is required for stage "${s.name}", to say where a failed ${s.name} sends the Task (e.g. on_fail = "implement")`,
+      });
+      return z.NEVER;
+    }
+    return { ...s, on_fail };
+  });
 
 const pipelineSchema = z.strictObject({
   stages: z.array(stageSchema).min(1),
@@ -56,8 +81,6 @@ type CheckedStage = Checked["stages"][number];
 export interface StageConfig {
   name: string;
   type: (typeof STAGE_TYPES)[number];
-  /** Agent stages only. Which Agents run, in turn. */
-  agents?: string[];
   /** Agent stages: how the Agents' Verdicts combine. */
   require: "all" | "any";
   /** Gate stages only: the Gates to run, in turn. */
@@ -69,12 +92,15 @@ export interface StageConfig {
   /** Overrides `breaker.per_stage` for this Stage. */
   max_rounds?: number;
   /** The lanes this Stage runs in. Absent means every lane. */
-  lanes?: string[];
+  lanes?: Lane[];
 }
 
 export interface Pipeline {
   stages: StageConfig[];
-  /** Kind → Stage → Agents, replacing that Stage's own `agents` for Tasks of the Kind. */
+  /**
+   * Kind → Stage → Agents, the Agents that run in turn. The `default` Kind names every agent Stage,
+   * and is what a Task gets for a Stage its own Kind leaves out (ADR 0011).
+   */
   kinds: Record<string, Record<string, string[]>>;
   breaker: { per_stage: number; per_task: number };
   notify: { usage: "task" | "off"; events: (typeof NOTIFY_EVENTS)[number][] };
@@ -82,7 +108,7 @@ export interface Pipeline {
 }
 
 export interface PipelineOptions {
-  /** Every Agent name that exists, to catch a typo in `agents`. Unchecked when absent (no Agent library yet). */
+  /** Every Agent name that exists, to catch a typo in `kinds`. Unchecked when absent; `loadPipeline` fills it in. */
   agents?: ReadonlySet<string>;
   /** Every Gate name that exists, to catch a typo in `gates`. Unchecked when absent. */
   gates?: ReadonlySet<string>;
@@ -91,18 +117,12 @@ export interface PipelineOptions {
 }
 
 /** Every problem with a `pipeline.toml`, one readable line each (`issues`), prefixed by its source. */
-export class PipelineError extends Error {
-  readonly issues: string[];
+export class PipelineError extends ConfigFileError {}
 
-  constructor(issues: string[], source: string) {
-    super(issues.map((i) => `${source}: ${i}`).join("\n"));
-    this.name = "PipelineError";
-    this.issues = issues;
-  }
-}
-
-export function loadPipeline(path: string, opts: Omit<PipelineOptions, "source">): Pipeline {
-  return parsePipeline(readFileSync(path, "utf8"), { ...opts, source: path });
+/** Loads a Pipeline file, checking its Agents against foreman's own `agents/` unless `agents` says otherwise. */
+export function loadPipeline(path: string, opts: Omit<PipelineOptions, "source"> = {}): Pipeline {
+  const agents = opts.agents ?? agentNames(join(FOREMAN_DIR, "agents"));
+  return parsePipeline(readFileSync(path, "utf8"), { ...opts, agents, source: path });
 }
 
 /** Parses and validates a `pipeline.toml`, filling in defaults. Throws a `PipelineError` listing every problem. */
@@ -126,7 +146,7 @@ export function validatePipeline(raw: unknown, opts: PipelineOptions = {}): Pipe
   const shape = pipelineSchema.safeParse(raw);
   if (!shape.success) {
     throw new PipelineError(
-      shape.error.issues.map((i) => `${formatPath(i.path)}: ${i.message}`),
+      shape.error.issues.map((i) => `${formatPath(i.path, "pipeline")}: ${i.message}`),
       source,
     );
   }
@@ -136,12 +156,18 @@ export function validatePipeline(raw: unknown, opts: PipelineOptions = {}): Pipe
   return resolve(parsed);
 }
 
-function formatPath(path: PropertyKey[]): string {
-  let out = "";
-  for (const part of path) {
-    out += typeof part === "number" ? `[${part}]` : out ? `.${String(part)}` : String(part);
+/** The names a `--fake` script may key its steps by: every Stage and every Agent in the Pipelines. */
+export function scriptNames(pipelines: Pipeline[]): Set<string> {
+  const names = new Set<string>();
+  for (const pipeline of pipelines) {
+    for (const s of pipeline.stages) {
+      names.add(s.name);
+    }
+    for (const byStage of Object.values(pipeline.kinds)) {
+      for (const agents of Object.values(byStage)) for (const a of agents) names.add(a);
+    }
   }
-  return out || "pipeline";
+  return names;
 }
 
 /** `on_pass` defaults to the next Stage in order, or `done` after the last. */
@@ -158,8 +184,6 @@ function resolve(p: Checked): Pipeline {
     stages: p.stages.map((s) => ({
       ...s,
       require: s.require ?? "all",
-      // checkMeaning has rejected a missing on_fail by now.
-      on_fail: s.on_fail as string,
     })),
   };
 }
@@ -184,29 +208,27 @@ function checkMeaning(
       byName.set(s.name, s);
     }
   }
+  const defaults = p.kinds[DEFAULT_KIND] ?? {};
   const checkAgents = (where: string, agents: string[]) => {
     if (!knownAgents) return;
-    const known = [...knownAgents].sort().join(", ");
     for (const a of agents) {
-      if (!knownAgents.has(a)) issues.push(`${where}: unknown agent "${a}" (known: ${known})`);
+      if (!knownAgents.has(a)) issues.push(`${where}: ${unknownName("agent", a, knownAgents)}`);
     }
   };
 
   for (const s of p.stages) {
     const at = `stage "${s.name}"`;
-    if (s.type === "agent") {
-      if (!s.agents) issues.push(`${at}: agent stages need agents, e.g. agents = ["name"]`);
-      else checkAgents(at, s.agents);
-    } else if (s.agents) {
-      issues.push(`${at}: agents are only for agent stages, and this is a ${s.type} stage`);
+    if (s.type === "agent" && !defaults[s.name]) {
+      issues.push(
+        `${at}: agent stages need an entry in [kinds.${DEFAULT_KIND}], e.g. ${s.name} = ["name"]`,
+      );
     }
     if (s.type === "gate") {
       if (!s.gates) {
         issues.push(`${at}: gate stages need gates, e.g. gates = ["check_passes"]`);
       } else if (knownGates) {
-        const known = [...knownGates].sort().join(", ");
         for (const g of s.gates) {
-          if (!knownGates.has(g)) issues.push(`${at}: unknown gate "${g}" (known: ${known})`);
+          if (!knownGates.has(g)) issues.push(`${at}: ${unknownName("gate", g, knownGates)}`);
         }
       }
     } else if (s.gates) {
@@ -219,11 +241,7 @@ function checkMeaning(
     if (s.on_pass !== DONE && !byName.has(s.on_pass)) {
       issues.push(`${at}: on_pass "${s.on_pass}" is not a stage (stages: ${targets})`);
     }
-    if (s.on_fail === undefined) {
-      issues.push(
-        `${at}: on_fail is required, to say where a failed ${s.name} sends the Task (e.g. on_fail = "implement")`,
-      );
-    } else if (s.on_fail === DONE) {
+    if (s.on_fail === DONE) {
       issues.push(
         `${at}: on_fail cannot be "${DONE}", a failed Stage must send the Task to a Stage`,
       );
@@ -252,7 +270,29 @@ function checkMeaning(
     }
   }
 
+  issues.push(...failLaneGaps(p, byName));
   issues.push(...passCycles(byName));
+  return issues;
+}
+
+/**
+ * A failed Stage sends the Task straight to its `on_fail` Stage, so that Stage must run in every
+ * lane the failing Stage runs in. Otherwise the Task would land on a Stage its lane skips.
+ */
+function failLaneGaps(p: Checked, byName: Map<string, CheckedStage>): string[] {
+  const declared = LANES.filter((lane) => lane in p.lanes);
+  const issues: string[] = [];
+  for (const s of p.stages) {
+    const target = byName.get(s.on_fail);
+    if (!target?.lanes) continue;
+    for (const lane of s.lanes ?? declared) {
+      if (lane in p.lanes && !target.lanes.includes(lane)) {
+        issues.push(
+          `stage "${s.name}": on_fail "${target.name}" does not run in the ${lane} lane, which "${s.name}" runs in`,
+        );
+      }
+    }
+  }
   return issues;
 }
 

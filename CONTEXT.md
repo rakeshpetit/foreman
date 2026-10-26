@@ -115,11 +115,11 @@ A Skill an Agent always follows, as opposed to an available Skill it may choose 
 _Avoid_: Required skill
 
 **Output contract**:
-What an Agent must leave behind for its Stage: the file it writes and the Verdicts it may give.
+What an Agent must leave behind for its Stage: its report (foreman says where it goes) and the Verdicts it may give.
 _Avoid_: Schema, interface
 
 **Verdict**:
-An Agent's declared result for a Run, chosen from its Output contract (for example PASS, BLOCKED, SCOPE_CHANGE).
+An Agent's declared result for a Run, chosen from its Output contract. There are four: PASS, FAIL, BLOCKED and SCOPE_CHANGE. Every Output contract must allow PASS. A Stage only ever ends in PASS or FAIL, so BLOCKED and SCOPE_CHANGE are handled before routing (they wait for M5-T06 and M5-T08).
 _Avoid_: Status, result
 
 **Gate**:

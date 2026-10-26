@@ -5,9 +5,10 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, test } from "node:test";
 import { MIGRATIONS } from "../src/store/schema.ts";
 import { Store } from "../src/store/store.ts";
-import { REPO_ROOT, removeTmpDirs, tmpDir } from "./helpers.ts";
+import { closeStores, memoryStore, REPO_ROOT, removeTmpDirs, tmpDir } from "./helpers.ts";
 
 afterEach(removeTmpDirs);
+afterEach(closeStores);
 
 function tmpHome() {
   return tmpDir("foreman-");
@@ -38,13 +39,13 @@ test("the requests table has no status column", () => {
 });
 
 test("Store.db is private", () => {
-  const s = Store.memory();
+  const s = memoryStore();
   // @ts-expect-error db is private to the store
   assert.ok(s.db);
 });
 
 test("an unknown Origin, Lane, Approval kind or channel is a type error", () => {
-  const s = Store.memory();
+  const s = memoryStore();
   const r = s.createRequest({ title: "a", target_repo: "/r" });
   const m = s.createMilestone({ request_id: r.id, seq: 1, title: "m" });
   const base = { milestone_id: m.id, seq: 1, title: "t" };
@@ -89,7 +90,7 @@ test("a stored row with an unknown value throws a clear error when read", () => 
 });
 
 test("allocates R-n, M-n, T-n ids", () => {
-  const s = Store.memory();
+  const s = memoryStore();
   const r1 = s.createRequest({ title: "a", target_repo: "/r" });
   const r2 = s.createRequest({ title: "b", target_repo: "/r" });
   assert.deepEqual([r1.id, r2.id], ["R-1", "R-2"]);
@@ -99,7 +100,7 @@ test("allocates R-n, M-n, T-n ids", () => {
 });
 
 test("creates and reads every entity", () => {
-  const s = Store.memory();
+  const s = memoryStore();
   const r = s.createRequest({ title: "a", target_repo: "/r", mode: "auto" });
   assert.equal(r.mode, "auto");
   s.updateRequest(r.id, { phase: "building" });
@@ -137,7 +138,7 @@ test("creates and reads every entity", () => {
 });
 
 test("listEvents(n) returns the newest n events, oldest first", () => {
-  const s = Store.memory();
+  const s = memoryStore();
   for (let i = 1; i <= 25; i++) s.addEvent("e", `S-${i}`);
   assert.equal(s.listEvents().length, 25);
   const recent = s.listEvents(10);
@@ -150,7 +151,7 @@ test("listEvents(n) returns the newest n events, oldest first", () => {
 });
 
 test("leases are exclusive until expiry", () => {
-  const s = Store.memory();
+  const s = memoryStore();
   let t = new Date("2026-01-01T00:00:00Z");
   s.now = () => t;
   assert.ok(s.takeLease("T-1", "a", 1000));

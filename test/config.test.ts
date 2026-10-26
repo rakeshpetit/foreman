@@ -11,7 +11,8 @@ import {
   loadConfig,
 } from "../src/config/layers.ts";
 import { PipelineError } from "../src/config/pipeline.ts";
-import { removeTmpDirs, tmpDir } from "./helpers.ts";
+import { resolveConfig } from "../src/config/resolve.ts";
+import { buildingRequest, memoryStore, removeTmpDirs, tmpDir } from "./helpers.ts";
 
 afterEach(removeTmpDirs);
 
@@ -19,14 +20,16 @@ const DEFAULTS = `
 [[stages]]
 name = "implement"
 type = "agent"
-agents = ["coder"]
 on_fail = "implement"
 
 [[stages]]
 name = "review"
 type = "agent"
-agents = ["critic"]
 on_fail = "implement"
+
+[kinds.default]
+implement = ["coder"]
+review = ["critic"]
 
 [kinds.ui]
 review = ["ui-critic"]
@@ -37,15 +40,21 @@ per_task = 6
 `;
 
 const AGENT = (extra = "") =>
-  `---\nmodel: sonnet\n${extra}output:\n  file: report.md\n  verdicts: [PASS]\n---\nRole prompt.\n`;
+  `---\nmodel: sonnet\n${extra}output:\n  verdicts: [PASS]\n---\nRole prompt.\n`;
 
 function addAgent(root: string, name: string, text = AGENT()) {
   mkdirSync(join(root, name), { recursive: true });
   writeFileSync(join(root, name, "AGENT.md"), text);
 }
 
-/** A foreman checkout and a Target repo in temp dirs. `defaults` and `target` are file contents. */
-function world(opts: { defaults?: string; target?: string } = {}) {
+/** The Agents `DEFAULTS` names, and the ones the layer tests add. */
+const DEFAULT_AGENTS = ["coder", "critic", "ui-critic", "ui-coder", "ops-critic", "solo"];
+
+/**
+ * A foreman checkout and a Target repo in temp dirs. `defaults` and `target` are file contents.
+ * foreman's `agents/` holds `agents`, which default to the ones `DEFAULTS` names.
+ */
+function world(opts: { defaults?: string; target?: string; agents?: string[] } = {}) {
   const base = tmpDir("foreman-config-");
   const foremanDir = join(base, "foreman");
   const targetRepo = join(base, "repo");
@@ -55,6 +64,7 @@ function world(opts: { defaults?: string; target?: string } = {}) {
   if (opts.target !== undefined) {
     writeFileSync(join(targetRepo, ".foreman", "config.toml"), opts.target);
   }
+  for (const name of opts.agents ?? DEFAULT_AGENTS) addAgent(join(foremanDir, "agents"), name);
   const load = (extra: Partial<ConfigInput> = {}) =>
     loadConfig({ foremanDir, targetRepo, ...extra });
   return { foremanDir, targetRepo, load };
@@ -104,15 +114,18 @@ describe("loadConfig layers", () => {
 
   it("lets the Target repo replace the stages, naming it as the source of every stage key", () => {
     const w = world({
-      defaults: DEFAULTS.replace('[kinds.ui]\nreview = ["ui-critic"]\n', ""),
-      target: `[[stages]]\nname = "implement"\ntype = "agent"\nagents = ["solo"]\non_fail = "implement"\n`,
+      defaults: DEFAULTS.replace('[kinds.ui]\nreview = ["ui-critic"]\n', "").replace(
+        'review = ["critic"]\n',
+        "",
+      ),
+      target: `[[stages]]\nname = "implement"\ntype = "agent"\non_fail = "implement"\n[kinds.default]\nimplement = ["solo"]\n`,
     });
     const config = w.load();
     assert.deepEqual(
       config.pipeline.stages.map((s) => s.name),
       ["implement"],
     );
-    assert.equal(sourceOf(config, "stages.implement.agents"), "target");
+    assert.equal(sourceOf(config, "kinds.default.implement"), "target");
     assert.equal(sourceOf(config, "stages.implement.require"), "target");
   });
 
@@ -185,12 +198,13 @@ on_fail = "implement"
 describe("loadConfig agents", () => {
   it("loads foreman's Agents and the Target repo's, the Target repo winning by name", () => {
     const w = world();
-    addAgent(join(w.foremanDir, "agents"), "coder");
-    addAgent(join(w.foremanDir, "agents"), "critic");
     addAgent(join(w.targetRepo, ".foreman", "agents"), "critic", AGENT("effort: high\n"));
     addAgent(join(w.targetRepo, ".foreman", "agents"), "extra");
     const config = w.load();
-    assert.deepEqual([...config.agents.keys()].sort(), ["coder", "critic", "extra"]);
+    assert.deepEqual(
+      [...config.agents.keys()].sort(),
+      ["coder", "critic", "extra", ...DEFAULT_AGENTS.slice(2)].sort(),
+    );
     assert.equal(config.agents.get("critic")?.agent.effort, "high");
     assert.equal(sourceOf(config, "agents.critic"), "target");
     assert.equal(sourceOf(config, "agents.coder"), "default");
@@ -213,17 +227,30 @@ describe("loadConfig agents", () => {
     assert.match(err.message, /agents\/empty.*no AGENT\.md/);
   });
 
-  it("checks Agent names only when strictAgents is set", () => {
-    const w = world();
-    assert.doesNotThrow(() => w.load());
-    const err = errorOf(() => w.load({ strictAgents: true }));
+  it("always checks the Agent names a Stage or Kind uses", () => {
+    const w = world({ agents: ["critic"] });
+    const err = errorOf(() => w.load());
     assert.ok(err instanceof PipelineError);
-    assert.match(err.message, /unknown agent "coder"/);
+    assert.match(err.message, /kinds\.default\.implement: unknown agent "coder" \(known: critic\)/);
+    assert.match(err.message, /kinds\.ui\.review: unknown agent "ui-critic"/);
 
     addAgent(join(w.targetRepo, ".foreman", "agents"), "coder");
-    addAgent(join(w.targetRepo, ".foreman", "agents"), "critic");
     addAgent(join(w.targetRepo, ".foreman", "agents"), "ui-critic");
-    assert.doesNotThrow(() => w.load({ strictAgents: true }));
+    assert.doesNotThrow(() => w.load());
+  });
+
+  it("rejects a per-Task override naming an unknown Agent, naming the Task, Stage and known Agents", () => {
+    const w = world();
+    const request = { id: "R-1", taskAgents: { "T-2": { review: ["critc"] } } };
+    const err = errorOf(() => w.load({ request }));
+    assert.ok(err instanceof ConfigError);
+    assert.match(
+      err.message,
+      /request R-1: task T-2: stage "review": unknown agent "critc" \(known: .*ui-critic\)/,
+    );
+    assert.doesNotThrow(() =>
+      w.load({ request: { id: "R-1", taskAgents: { "T-2": { review: ["critic"] } } } }),
+    );
   });
 
   it("gives skill roots with the Target repo's first", () => {
@@ -274,6 +301,46 @@ describe("formatEntries", () => {
     assert.match(find("check") ?? "", /^check\s+= "npm test"\s+\(target\)$/);
     assert.match(find("breaker.per_task") ?? "", /^breaker\.per_task\s+= 9\s+\(target\)$/);
     assert.match(find("breaker.per_stage") ?? "", /^breaker\.per_stage\s+= 3\s+\(default\)$/);
-    assert.match(find("stages.review.agents") ?? "", /= \["critic"\]\s+\(default\)$/);
+    assert.match(find("kinds.default.review") ?? "", /= \["critic"\]\s+\(default\)$/);
   });
+});
+
+describe("resolveConfig per-Task overrides", () => {
+  function requestWithTasks(overrides: Record<string, string | null>) {
+    const w = world();
+    const store = memoryStore();
+    const { r, m } = buildingRequest(store, { title: "r", target_repo: w.targetRepo });
+    let seq = 0;
+    for (const agent_overrides of Object.values(overrides)) {
+      const t = store.createTask({ milestone_id: m.id, seq: ++seq, title: "t" });
+      store.updateTask(t.id, { agent_overrides });
+    }
+    return { w, store, request: r };
+  }
+
+  it("reads each Task's agent_overrides once into taskAgents", () => {
+    const { w, store, request } = requestWithTasks({
+      a: JSON.stringify({ review: ["critic"] }),
+      b: null,
+    });
+    const config = resolveConfig(store, request, w.foremanDir);
+    assert.deepEqual(config.taskAgents, { "T-1": { review: ["critic"] }, "T-2": {} });
+  });
+
+  for (const [name, value] of [
+    ["not JSON", "{oops"],
+    ["not an object", "[1]"],
+    ["Agents that are not a list of names", '{"review": "critic"}'],
+    ["an empty list of Agents", '{"review": []}'],
+  ] as const) {
+    it(`fails on agent_overrides that are ${name}, naming the Task`, () => {
+      const { w, store, request } = requestWithTasks({ a: null, b: value });
+      const err = errorOf(() => resolveConfig(store, request, w.foremanDir));
+      assert.ok(err instanceof ConfigError);
+      assert.match(
+        err.message,
+        /T-2: agent_overrides is not a \{"<stage>": \["<agent>", \.\.\.\]\} object/,
+      );
+    });
+  }
 });
