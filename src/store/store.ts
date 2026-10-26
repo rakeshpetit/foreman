@@ -286,6 +286,7 @@ export class Store {
         | "branch"
         | "agent_overrides"
         | "title"
+        | "file_path"
       >
     >,
   ): void {
