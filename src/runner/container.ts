@@ -128,11 +128,7 @@ export class ContainerRunner implements Runner {
     if (outcome.code !== 0) {
       const output = readOutput(outcome.stdout);
       const why = (output?.is_error && output.result) || tail(outcome.stderr);
-      throw new RunFailure(
-        failureKind(output),
-        `${name} exited ${outcome.code}: ${why}`,
-        outcome.stdout,
-      );
+      throw claudeFailure(output, `${name} exited ${outcome.code}: ${why}`, outcome.stdout);
     }
     return outcome.stdout;
   }
@@ -226,13 +222,34 @@ function readOutput(stdout: string): z.output<typeof claudeOutput> | undefined {
 
 /**
  * `auth` for a 401 or "Not logged in": the token is bad or expired (docs/spikes/claude-in-container.md).
- * Any other error Claude reports, or none, is `failed`.
+ * `usage-limit` for "You've hit/reached your … limit". Any other error Claude reports, or none, is
+ * `failed`. The limit's text is inferred from the Claude Code binary, not seen: see the spike.
  */
-function failureKind(output: z.output<typeof claudeOutput> | undefined): "auth" | "failed" {
-  const auth =
-    output?.is_error &&
-    (output.api_error_status === 401 || /Not logged in/.test(output.result ?? ""));
-  return auth ? "auth" : "failed";
+function failureKind(
+  output: z.output<typeof claudeOutput> | undefined,
+): "auth" | "usage-limit" | "failed" {
+  if (!output?.is_error) return "failed";
+  const text = output.result ?? "";
+  if (output.api_error_status === 401 || /Not logged in/.test(text)) return "auth";
+  return /\b(?:hit|reached) your\b.*\blimit/i.test(text) ? "usage-limit" : "failed";
+}
+
+/**
+ * The failure for an error Claude reported. A usage limit carries the first `resetsAt` (epoch
+ * seconds) in the output, as the `rate_limit_event` has it; none if the output has none.
+ */
+function claudeFailure(
+  output: z.output<typeof claudeOutput> | undefined,
+  message: string,
+  stdout: string,
+  usage?: Usage,
+): RunFailure {
+  const kind = failureKind(output);
+  const seconds = kind === "usage-limit" && /"resetsAt"\s*:\s*(\d+)/.exec(stdout)?.[1];
+  // Epoch seconds, but a value too big to be seconds is milliseconds.
+  const epoch = seconds ? Number(seconds) : undefined;
+  const ms = epoch && (epoch > 1e11 ? epoch : epoch * 1000);
+  return new RunFailure(kind, message, stdout, usage, ms ? new Date(ms) : undefined);
 }
 
 function usageOf({ usage, total_cost_usd }: z.output<typeof claudeOutput>): Usage {
@@ -258,7 +275,7 @@ function parseResult(stdout: string, spec: RunSpec): RunResult {
   const { is_error, result, structured_output } = output;
   const usage = usageOf(output);
   if (is_error) {
-    throw new RunFailure(failureKind(output), `claude reported an error: ${result}`, stdout, usage);
+    throw claudeFailure(output, `claude reported an error: ${result}`, stdout, usage);
   }
 
   const allowed = spec.verdictSchema.properties.verdict.enum;

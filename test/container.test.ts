@@ -270,6 +270,70 @@ describe("ContainerRunner", () => {
     );
   });
 
+  it("fails with `usage-limit` at the subscription limit, with the reset time the output carries", async () => {
+    const { workdir, docker, runner } = setup();
+    const stdout = claudeResult({
+      is_error: true,
+      result: "You've hit your 5-hour usage limit",
+      structured_output: undefined,
+      rate_limit_info: { status: "rejected", resetsAt: 1793039400, rateLimitType: "five_hour" },
+    });
+    docker.claude = () => ({ code: 1, stdout, stderr: "" });
+    await assert.rejects(
+      runner.run(spec(workdir)),
+      (e) =>
+        e instanceof RunFailure &&
+        e.kind === "usage-limit" &&
+        e.resetsAt?.getTime() === 1793039400_000 &&
+        e.stdout === stdout,
+    );
+  });
+
+  it("reads a reset time given in milliseconds", async () => {
+    const { workdir, docker, runner } = setup();
+    docker.claude = () => ({
+      code: 1,
+      stdout: claudeResult({
+        is_error: true,
+        result: "You've hit your weekly usage limit",
+        structured_output: undefined,
+        rate_limit_info: { status: "rejected", resetsAt: 1793039400_000 },
+      }),
+      stderr: "",
+    });
+    await assert.rejects(
+      runner.run(spec(workdir)),
+      (e) => e instanceof RunFailure && e.resetsAt?.getTime() === 1793039400_000,
+    );
+  });
+
+  it("fails with `usage-limit` and no reset time when the output gives none", async () => {
+    const { workdir, docker, runner } = setup();
+    docker.claude = () => ({
+      code: 0,
+      stdout: claudeResult({
+        is_error: true,
+        result: "You have reached your weekly usage limit",
+        structured_output: undefined,
+      }),
+      stderr: "",
+    });
+    await assert.rejects(
+      runner.run(spec(workdir)),
+      (e) => e instanceof RunFailure && e.kind === "usage-limit" && e.resetsAt === undefined,
+    );
+  });
+
+  it("does not mistake a successful Run's rate-limit event for a limit", async () => {
+    const { workdir, docker, runner } = setup();
+    docker.claude = () => ({
+      code: 0,
+      stdout: claudeResult({ rate_limit_info: { status: "allowed", resetsAt: 1793039400 } }),
+      stderr: "",
+    });
+    assert.equal((await runner.run(spec(workdir))).verdict, "PASS");
+  });
+
   it("fails with `invalid-result` when the output is not JSON", async () => {
     const { workdir, docker, runner } = setup();
     docker.claude = () => ({ code: 0, stdout: "hello", stderr: "" });

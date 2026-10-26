@@ -205,6 +205,13 @@ This file is also the input format for `foreman import` (M1-T02). From M6 on, fo
 - **Kind:** core · **Size:** S · **Depends:** M3-T05
 - **Do:** Recognise the usage-limit error (its shape comes from M3-T01), then set `queue_state.paused_until` to the reset time, send one ntfy and resume on its own. `foreman resume` overrides the pause.
 - **Done when:** a scripted limit error pauses the queue, the Task is not charged a Round, and the queue resumes after the (faked) clock passes the reset time.
+- **Decisions:**
+  - The Runner recognises a limit by Claude's `is_error` text ("You've hit/reached your … limit"), not by `rate_limit_event`: the Runner uses `--output-format json`, whose result carries no such event. The reset time is the first `"resetsAt"` (epoch seconds) in the output, if any. Both are inferred from the spike, not seen, and must be confirmed against the first real limit.
+  - A limit is never retried and never escalates: `tick` pauses the queue (`paused_until` = reset, reason, a `queue.paused` event), puts the Task back to `queued` at the same Stage with no Round, and `runEngine` sends one main-topic ntfy and stops.
+  - With no reset time, or one not in the future, the pause is a fixed 30 minutes; if the limit is still on, the next Run pauses again.
+  - An Owner's `foreman pause` set while the Run was in flight is kept: the limit does not turn it into a timed pause.
+  - Known limits: only the usage-limit text triggers the pause (any other limit wording is an ordinary failure: one retry, then an Escalation); a multi-Agent Stage that hits the limit midway reruns its first Agents after the reset; the Task's `task.started` event repeats, as after a crash.
+  - "Resumes on its own" means `tick` stops treating the queue as paused once `paused_until` passes. Nothing wakes `foreman run`: the next `run` picks the Task up.
 
 ### M3-T07 · Smoke test
 - **Kind:** integration · **Size:** S · **Depends:** M3-T05

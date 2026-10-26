@@ -101,6 +101,8 @@ Both are distinguishable from a Verdict failure by `is_error: true` with no `str
 - `rate_limit_event` carries `status` (the event above shows `allowed`), `rateLimitType` (`five_hour`, `seven_day`) and `resetsAt` in epoch seconds;
 - Claude Code can itself wait and continue at a limit (a setting called "Continue automatically at usage limit"), and refuses to wait when the reset is more than 24 hours out.
 
+**As built (M3-T06):** the Runner uses `--output-format json`, not `stream-json`, so `rate_limit_event` never reaches it. It matches the `is_error` text instead and takes the first `"resetsAt"` in the output as the reset time; with none it pauses for a fixed 30 minutes. Confirm both against the first real limit.
+
 **M3-T06 should key off `rate_limit_event.rate_limit_info.status` not being `allowed`, plus `resetsAt`**, instead of matching error text, and must be confirmed against a real limit the first time one happens. Until then its fake can only follow the shape above. Keep PLAN.md's fallback in reserve: if a Run exits with `is_error` and no recognisable shape, pause for a fixed time and notify the Owner. The `rate_limit_event` value in an `error` result, and whether the CLI's own auto-wait could hold a Run for hours inside the container, are open. M3-T04's wall-clock timeout covers the second.
 
 ## Agents and Skills

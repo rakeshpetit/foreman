@@ -11,6 +11,7 @@ import type { RunRow, Store, TaskRow } from "../store/store.ts";
 import { blockingFindings, priorReports } from "./context.ts";
 import { Escalation } from "./escalation.ts";
 import type { StageExecutor } from "./tick.ts";
+import { UsageLimit } from "./usage-limit.ts";
 import { isRouted, type Verdict } from "./verdict.ts";
 
 export interface AgentExecutorOptions {
@@ -36,7 +37,8 @@ interface History {
  *
  * A Run that leaves no usable result (a failed container, a timeout, no valid Verdict, no report)
  * is an infrastructure failure: it costs no Round, gets one retry, and then Escalates. A bad
- * token is not retried: it throws, and the engine stops for the Owner to fix it.
+ * token is not retried: it throws, and the engine stops for the Owner to fix it. A usage limit is
+ * not retried either: it throws a `UsageLimit`, and `tick` pauses the queue until the reset.
  *
  * Each Run's prompts come from its Agent's AGENT.md (`assembleRunSpec`). Every Agent of a pass
  * reads the same history, taken before the pass starts.
@@ -64,6 +66,9 @@ export function agentExecutor(opts: AgentExecutorOptions): StageExecutor {
 /** Tries a Run gets when it leaves no usable result: the first, and one retry. */
 const ATTEMPTS = 2;
 
+/** How long to pause for a usage limit whose reset time is unknown, or not in the future. */
+const FALLBACK_PAUSE_MS = 30 * 60_000;
+
 async function runAgent(
   opts: AgentExecutorOptions,
   task: TaskRow,
@@ -77,6 +82,7 @@ async function runAgent(
     } catch (e) {
       // Anything but a failed Run (a bug, a missing token file) or a bad token is not for a retry to fix.
       if (!(e instanceof RunFailure) || e.kind === "auth") throw e;
+      if (e.kind === "usage-limit") throw new UsageLimit(e.message, resetOf(e, opts.store.now()));
       if (attempt === ATTEMPTS) {
         throw new Escalation(
           `${agentName} left no usable result in ${stage.name} after ${ATTEMPTS} tries: ${e.message}`,
@@ -90,6 +96,12 @@ async function runAgent(
       });
     }
   }
+}
+
+/** The reset time a limit failure gives, or a fixed wait from `now` when it gives none or a past one. */
+function resetOf(failure: RunFailure, now: Date): Date {
+  const { resetsAt } = failure;
+  return resetsAt && resetsAt > now ? resetsAt : new Date(now.getTime() + FALLBACK_PAUSE_MS);
 }
 
 /** One Run, recorded in its `runs` row whether it succeeds or not. */

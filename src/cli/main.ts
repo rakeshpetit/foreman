@@ -179,6 +179,7 @@ async function dispatch(
       ctx.out(`Ran ${ran} stage${ran === 1 ? "" : "s"}`);
       for (const r of results) {
         if (r.kind === "escalated") ctx.out(`${r.task} escalated in ${r.stage}: ${r.message}`);
+        if (r.kind === "usage-limit") ctx.out(`Usage limit reached: paused until ${r.until}`);
       }
       const crashed = results.find((r) => r.kind === "error");
       if (crashed) {

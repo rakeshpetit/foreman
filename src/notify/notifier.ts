@@ -37,6 +37,12 @@ export const escalation = (task: string, message: string): Notification => ({
   tags: ["sos"],
 });
 
+export const usageLimitPause = (until: string): Notification => ({
+  title: "Foreman paused: usage limit",
+  message: `The usage limit was reached. The queue is paused until ${until}.`,
+  tags: ["hourglass_flowing_sand"],
+});
+
 export const engineError = (error: unknown): Notification => ({
   title: "Foreman engine error",
   message: error instanceof Error ? error.message : String(error),

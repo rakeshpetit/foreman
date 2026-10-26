@@ -10,6 +10,7 @@ import {
   notifySafely,
   requestDone,
   taskDone,
+  usageLimitPause,
 } from "../src/notify/notifier.ts";
 import { NtfyNotifier } from "../src/notify/ntfy.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
@@ -227,4 +228,42 @@ test("an Escalation parks its Task, sends one high-priority ping and lets the lo
   assert.equal(pings[0]?.topic, "foreman");
   assert.equal(pings[0]?.priority, "high");
   assert.match(pings[0]?.body ?? "", /invalid-result|bad/);
+});
+
+test("a usage limit pauses the queue, sends one ping on the main topic and stops the loop without an engine error", async () => {
+  const store = seed();
+  const [task] = store.listTasks();
+  const reset = new Date(Date.now() + 3_600_000);
+  let calls = 0;
+  const runner: Runner = {
+    run: async () => {
+      calls++;
+      throw new RunFailure(
+        "usage-limit",
+        "You've hit your 5-hour usage limit",
+        "",
+        undefined,
+        reset,
+      );
+    },
+  };
+  fake.calls.length = 0;
+  const results = await runEngine(store, { home: home(), untilIdle: true, runner, notifier });
+  assert.deepEqual(
+    results.map((r) => r.kind),
+    ["usage-limit"],
+  );
+  assert.equal(calls, 1);
+  assert.equal(store.isPaused(), true);
+  assert.equal(store.getTask(task?.id ?? "")?.status, "queued");
+  assert.equal(fake.calls.length, 1);
+  const [ping] = fake.calls;
+  assert.equal(ping?.title, usageLimitPause(reset.toISOString()).title);
+  assert.equal(ping?.topic, "foreman");
+  assert.match(ping?.body ?? "", new RegExp(reset.toISOString()));
+
+  // Paused ticks do not send it again.
+  fake.calls.length = 0;
+  await runEngine(store, { home: home(), untilIdle: true, runner, notifier });
+  assert.equal(fake.calls.length, 0);
 });

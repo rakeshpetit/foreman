@@ -74,6 +74,8 @@ export type RunFailureKind =
   | "failed"
   /** Claude could not log in: a bad or expired token, which a retry cannot fix. */
   | "auth"
+  /** The subscription's usage limit is reached: nothing can run until it resets, so a retry cannot help. */
+  | "usage-limit"
   /** It exited cleanly but left no valid Verdict: unparseable output, a missing or disallowed Verdict. */
   | "invalid-result"
   /** It left a Verdict but not the report its Output contract asks for. */
@@ -85,11 +87,14 @@ export class RunFailure extends Error {
   readonly stdout: string;
   /** What the Run spent before it failed, when its output says. */
   readonly usage?: Usage;
+  /** For `usage-limit`: when the limit resets, if the output says. */
+  readonly resetsAt?: Date;
 
-  constructor(kind: RunFailureKind, message: string, stdout = "", usage?: Usage) {
+  constructor(kind: RunFailureKind, message: string, stdout = "", usage?: Usage, resetsAt?: Date) {
     super(message);
     this.kind = kind;
     this.stdout = stdout;
     this.usage = usage;
+    this.resetsAt = resetsAt;
   }
 }

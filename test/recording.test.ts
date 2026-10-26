@@ -6,6 +6,7 @@ import { parsePipeline } from "../src/config/pipeline.ts";
 import { agentExecutor } from "../src/engine/agent.ts";
 import { Escalation } from "../src/engine/escalation.ts";
 import { tick } from "../src/engine/tick.ts";
+import { UsageLimit } from "../src/engine/usage-limit.ts";
 import { ContainerRunner } from "../src/runner/container.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
 import { RunFailure, type Runner, type RunResult } from "../src/runner/runner.ts";
@@ -298,5 +299,113 @@ describe("infrastructure failures", () => {
     assert.match(events[0]?.payload ?? "", /"stage":"implement"/);
     // Its lease is released, and the parked Task is not picked up again.
     assert.equal((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind, "idle");
+  });
+});
+
+describe("a usage limit", () => {
+  const RESET = new Date("2026-10-26T20:00:00Z");
+  const NOW = new Date("2026-10-26T15:00:00Z");
+  const limit = (resetsAt?: Date) =>
+    new RunFailure("usage-limit", "You've hit your 5-hour usage limit", "raw", undefined, resetsAt);
+
+  it("is not retried: it throws a UsageLimit that carries the reset time, and the Run's row says why", async () => {
+    const { s, t, task, stage, home, config } = setup();
+    s.now = () => NOW;
+    const runner = scripted([limit(RESET), {}]);
+    const executor = agentExecutor({ store: s, runner, home, config });
+    await assert.rejects(
+      executor(task(), stage("implement")),
+      (e) => e instanceof UsageLimit && e.resetsAt.getTime() === RESET.getTime(),
+    );
+    assert.equal(runner.calls, 1);
+    const [run] = s.listRuns(t.id);
+    assert.match(run?.error ?? "", /usage limit/);
+    assert.equal(readFileSync(join(home, "runs", `${run?.id}.json`), "utf8"), "raw");
+  });
+
+  it("falls back to a fixed pause when the reset time is missing or already past", async () => {
+    for (const resetsAt of [undefined, new Date(NOW.getTime() - 1000)]) {
+      const { s, task, stage, home, config } = setup();
+      s.now = () => NOW;
+      const executor = agentExecutor({
+        store: s,
+        runner: scripted([limit(resetsAt)]),
+        home,
+        config,
+      });
+      await assert.rejects(
+        executor(task(), stage("implement")),
+        (e) => e instanceof UsageLimit && e.resetsAt.getTime() === NOW.getTime() + 30 * 60_000,
+      );
+    }
+  });
+
+  it("pauses the queue until the reset, leaves the Task queued with no Round, then resumes by itself", async () => {
+    const { s, t, stage, home, config } = setup();
+    s.now = () => NOW;
+    const runner = scripted([limit(RESET), {}]);
+    const executor = agentExecutor({ store: s, runner, home, config });
+    const result = await tick(s, { pipelineFor: () => PIPELINE, executor });
+    assert.deepEqual(result, {
+      kind: "usage-limit",
+      task: t.id,
+      stage: stage("implement").name,
+      until: RESET.toISOString(),
+    });
+    const task = s.getTask(t.id);
+    assert.deepEqual(
+      [task?.status, task?.stage, task?.round_total, task?.round_stage],
+      ["queued", "implement", 0, 0],
+    );
+    assert.deepEqual(s.queueState(), {
+      paused: true,
+      paused_until: RESET.toISOString(),
+      reason: `usage limit reached, resumes ${RESET.toISOString()}`,
+    });
+    assert.equal(s.listEvents().filter((e) => e.type === "queue.paused").length, 1);
+
+    // Still before the reset: nothing runs, and nothing new is recorded.
+    s.now = () => new Date(RESET.getTime() - 1000);
+    assert.equal((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind, "paused");
+    assert.equal(runner.calls, 1);
+
+    // The clock passes the reset: the same Task runs, with no Owner action.
+    s.now = () => new Date(RESET.getTime() + 1000);
+    const resumed = await tick(s, { pipelineFor: () => PIPELINE, executor });
+    assert.deepEqual([resumed.kind, runner.calls], ["ran", 2]);
+    assert.equal(s.getTask(t.id)?.round_total, 0);
+  });
+
+  it("leaves an Owner's pause, set while the Run was in flight, until resumed", async () => {
+    const { s, home, config } = setup();
+    s.now = () => NOW;
+    const runner: Runner = {
+      run: async () => {
+        s.setQueueState({ paused: true, paused_until: null, reason: "paused by owner" });
+        throw limit(RESET);
+      },
+    };
+    const executor = agentExecutor({ store: s, runner, home, config });
+    await tick(s, { pipelineFor: () => PIPELINE, executor });
+    assert.deepEqual(s.queueState(), {
+      paused: true,
+      paused_until: null,
+      reason: "paused by owner",
+    });
+  });
+
+  it("is overridden by `resume`, which clears the pause before the reset", async () => {
+    const { s, t, home, config } = setup();
+    s.now = () => NOW;
+    const executor = agentExecutor({
+      store: s,
+      runner: scripted([limit(RESET), {}]),
+      home,
+      config,
+    });
+    await tick(s, { pipelineFor: () => PIPELINE, executor });
+    s.setQueueState({ paused: false, paused_until: null, reason: null });
+    const result = await tick(s, { pipelineFor: () => PIPELINE, executor });
+    assert.deepEqual([result.kind, s.getTask(t.id)?.stage], ["ran", "review"]);
   });
 });

@@ -11,6 +11,7 @@ import {
   notifySafely,
   requestDone,
   taskDone,
+  usageLimitPause,
 } from "../notify/notifier.ts";
 import type { Runner } from "../runner/runner.ts";
 import { writeStatus } from "../status/status.ts";
@@ -39,7 +40,7 @@ export function resolveConfigs(store: Store, foremanDir?: string): Map<string, R
   return configs;
 }
 
-/** Ticks the engine, rewriting STATUS.md after every tick. Stops on idle, paused or an error; an Escalation parks its Task and the loop goes on. Returns the tick results. */
+/** Ticks the engine, rewriting STATUS.md after every tick. Stops on idle, paused (a usage limit pauses the queue itself) or an error; an Escalation parks its Task and the loop goes on. Returns the tick results. */
 export async function runEngine(store: Store, opts: RunOptions): Promise<TickResult[]> {
   const results: TickResult[] = [];
   const configFor = configResolver(store, opts.configs, opts.foremanDir);
@@ -68,6 +69,7 @@ export async function runEngine(store: Store, opts: RunOptions): Promise<TickRes
 
 async function notifyTick(store: Store, result: TickResult, notifier: Notifier): Promise<void> {
   if (result.kind === "error") return notifySafely(notifier, engineError(result.message));
+  if (result.kind === "usage-limit") return notifySafely(notifier, usageLimitPause(result.until));
   if (result.kind === "escalated") {
     return notifySafely(notifier, escalation(result.task, result.message));
   }
