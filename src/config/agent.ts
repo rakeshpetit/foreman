@@ -103,7 +103,7 @@ export function parseAgent(text: string, { source }: AgentOptions): Agent {
 }
 
 /** The `---` block at the top of the file, and what follows it, with the line the body starts on. */
-function splitFrontmatter(text: string) {
+export function splitFrontmatter(text: string) {
   const m = /^---[ \t]*\r?\n([\s\S]*?)^---[ \t]*(?:\r?\n|$)/m.exec(text);
   if (m?.index !== 0) return undefined;
   const bodyLine = text.slice(0, m[0].length).split("\n").length;
