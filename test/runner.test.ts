@@ -75,6 +75,7 @@ test("FakeRunner writes scripted files, the report and returns usage", async () 
     ],
   });
   const result = await runner.run({
+    runId: 1,
     task: "T",
     stage: "implement",
     agent: "coder",

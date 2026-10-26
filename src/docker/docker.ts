@@ -26,15 +26,20 @@ export class CliDocker implements Docker {
 
 export class DockerError extends Error {}
 
+/** The last lines of a command's output: where its error is. */
+export function tail(text: string): string {
+  return text.trim().split("\n").slice(-10).join("\n");
+}
+
 /** Runs a docker command that must succeed. */
 export async function mustRun(docker: Docker, args: string[]): Promise<DockerResult> {
   const result = await docker.run(args);
   if (result.code !== 0) {
-    const tail = result.stderr.trim().split("\n").slice(-10).join("\n");
+    const detail = tail(result.stderr);
     // The command and subcommand only: the flags after them are noise in a message.
     const firstFlag = args.findIndex((a) => a.startsWith("-"));
     const command = firstFlag === -1 ? args : args.slice(0, firstFlag);
-    throw new DockerError(`docker ${command.join(" ")} failed (exit ${result.code}): ${tail}`);
+    throw new DockerError(`docker ${command.join(" ")} failed (exit ${result.code}): ${detail}`);
   }
   return result;
 }

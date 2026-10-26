@@ -33,6 +33,8 @@ export interface BlockingFinding {
 }
 
 export interface RunSpecInput {
+  /** The `runs` row this Run fills in. */
+  runId: number;
   agent: Agent;
   skills: ResolvedSkills;
   task: Pick<TaskRow, "id" | "title" | "kind" | "ref" | "lane" | "branch">;
@@ -55,6 +57,7 @@ export interface RunSpecInput {
 export function assembleRunSpec(input: RunSpecInput): RunSpec {
   const { agent, skills, task, stage, paths } = input;
   return {
+    runId: input.runId,
     task: task.id,
     stage,
     agent: agent.name,

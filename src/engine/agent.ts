@@ -74,6 +74,7 @@ async function runAgent(
     if (!loaded) throw new Error(`stage "${stage.name}": unknown agent "${agentName}"`);
     const requestDir = join(request.target_repo, ".foreman", request.id);
     const spec = assembleRunSpec({
+      runId,
       agent: loaded.agent,
       skills: resolveSkills(loaded.agent.skills, {
         roots: opts.config.skillRoots,

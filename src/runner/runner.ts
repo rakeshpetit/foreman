@@ -15,6 +15,8 @@ export interface VerdictSchema {
 }
 
 export interface RunSpec {
+  /** The `runs` row this Run fills in. */
+  runId: number;
   task: string;
   stage: Stage;
   /** The Agent doing this Run: one of the Stage's Agents. */
@@ -48,4 +50,25 @@ export interface RunResult {
 
 export interface Runner {
   run(spec: RunSpec): Promise<RunResult>;
+}
+
+/** Why a Run produced no usable result. */
+export type RunFailureKind =
+  /** It ran past its wall-clock limit and was killed. */
+  | "timeout"
+  /** The container exited non-zero, or Claude reported an error (a bad token, say). */
+  | "failed"
+  /** It exited cleanly but left no valid Verdict: unparseable output, a missing or disallowed Verdict. */
+  | "invalid-result";
+
+export class RunFailure extends Error {
+  readonly kind: RunFailureKind;
+  /** Everything the container printed, for the caller to keep. */
+  readonly stdout: string;
+
+  constructor(kind: RunFailureKind, message: string, stdout = "") {
+    super(message);
+    this.kind = kind;
+    this.stdout = stdout;
+  }
 }

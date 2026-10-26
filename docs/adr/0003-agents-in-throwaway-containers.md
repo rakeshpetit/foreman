@@ -1,5 +1,5 @@
 ---
-status: accepted (grilled to shared understanding 2026-10-26; images and egress network built in M3-T03; the Runner that uses them is not yet built)
+status: accepted (grilled to shared understanding 2026-10-26; images and egress network built in M3-T03; `ContainerRunner` built in M3-T04)
 ---
 
 # Agents run in throwaway containers with no git credentials; only foreman touches remotes
@@ -24,3 +24,4 @@ An unattended `claude -p` needs `--dangerously-skip-permissions`, or it stops at
 - **Confirmed by the M3-T01 spike** ([claude-in-container](../spikes/claude-in-container.md)): `CLAUDE_CODE_OAUTH_TOKEN` from an `--env-file` authenticates `claude -p` in a container. `--dangerously-skip-permissions` is refused as root, so every Agent image needs a non-root `agent` user, and the mounted worktree must be writable by it.
 - **Confirmed by the M3-T02 spike** ([egress](../spikes/egress.md)): an `internal: true` network plus an allowlisting tinyproxy container lets an Agent container reach only Anthropic, npm and PyPI. `github.com` is refused. The connections tried that bypassed the proxy all failed, and no fallback is needed. An allowed host can still be used to send data out, so the Run's token and the worktree remain the things to protect.
 - **Built in M3-T03:** `images/base` (Node 24, git, Python 3 + `uv`, pinned Claude Code, uid-1000 `agent` user) and `images/egress-proxy`, both from `foreman images build`. Until per-Agent images arrive, every Run uses the base image.
+- **Built in M3-T04:** `ContainerRunner` runs `docker run --rm` as the host's `uid:gid` (so the worktree mounted at `/work` stays writable), with a scratch tmpfs `HOME`, the Skills copied into a read-only `.claude/skills` mount, the token from `claude.env` via `--env-file`, and the proxy variables. A Run past its wall-clock limit is stopped with `docker kill`. It reads Claude's single `--output-format json` result; `stream-json` (the context peak, `rate_limit_event`) is left to M3-T05 and M3-T06.

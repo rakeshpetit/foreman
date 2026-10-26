@@ -13,7 +13,7 @@ ARG CLAUDE_CODE_VERSION=2.1.310
 RUN npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} && npm cache clean --force
 
 # `--dangerously-skip-permissions` is refused as root (the M3-T01 spike), so Runs use this user.
-# It takes uid 1000 in place of the image's own `node` user. Making a mounted worktree writable by it is M3-T04's job.
+# It takes uid 1000 in place of the image's own `node` user. The Runner starts containers as the host's uid instead, so the mounted worktree stays writable.
 RUN userdel -r node && useradd --create-home --uid 1000 --shell /bin/bash agent
 
 USER agent

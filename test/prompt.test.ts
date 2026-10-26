@@ -70,6 +70,7 @@ const PATHS = {
 
 function input(overrides: Partial<RunSpecInput> = {}): RunSpecInput {
   return {
+    runId: 7,
     agent: WITH_SKILLS,
     skills: SKILLS,
     task: {
@@ -141,6 +142,7 @@ describe("assembleRunSpec", () => {
   it("carries the Run's identity, paths and the Agent's settings", () => {
     const { systemPrompt, userPrompt, verdictSchema, ...rest } = assembleRunSpec(input());
     assert.deepEqual(rest, {
+      runId: 7,
       task: "T-2",
       stage: "implement",
       agent: "implementer",
