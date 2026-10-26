@@ -1,5 +1,5 @@
 {
   "formatter": { "indentStyle": "space", "indentWidth": 2, "lineWidth": 100 },
   "linter": { "enabled": true, "rules": { "preset": "recommended" } },
-  "files": { "includes": ["src/**", "test/**", "*.json"] }
+  "files": { "includes": ["src/**", "test/**", "*.json", "!test/fixtures/agents"] }
 }
