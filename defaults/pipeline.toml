@@ -1,0 +1,93 @@
+# foreman's default Pipeline (ADR 0004, 0005, 0006). A Target repo can override any of it in
+# `.foreman/`, and a Request can override Agents at Go.
+#
+# Each stage is an `agent`, a `gate` or an `owner` stage. `on_pass` defaults to the next stage
+# (`done` after the last). `on_fail` is always explicit. The Agents named here come from the Agent
+# library (M5-T10, M10-T07). The Gates are registered by M2-T02 and built in M4.
+
+# Workup writes the acceptance test. A failed Workup goes back to Workup and costs a Round (ADR 0010).
+[[stages]]
+name = "workup"
+type = "agent"
+agents = ["workup-tdd"]
+on_fail = "workup"
+lanes = ["normal"]
+
+# The acceptance test must fail before any implementation exists.
+[[stages]]
+name = "red"
+type = "gate"
+gates = ["red_before"]
+on_fail = "workup"
+lanes = ["normal"]
+
+[[stages]]
+name = "implement"
+type = "agent"
+agents = ["implementer-tdd"]
+on_fail = "implement"
+
+[[stages]]
+name = "gates"
+type = "gate"
+gates = ["green_after", "check_passes", "test_integrity", "diff_size"]
+on_fail = "implement"
+
+[[stages]]
+name = "review"
+type = "agent"
+agents = ["reviewer-standards", "reviewer-spec"]
+require = "all"
+on_fail = "implement"
+
+[[stages]]
+name = "verify"
+type = "agent"
+agents = ["verifier-api"]
+on_fail = "implement"
+
+[[stages]]
+name = "evidence"
+type = "gate"
+gates = ["evidence"]
+on_fail = "implement"
+
+# Manual Mode only (M5-T02): the Owner approves each Task before it merges. A rejection costs a Round.
+[[stages]]
+name = "task_approval"
+type = "owner"
+on_fail = "implement"
+
+# After the merge: look for what is still missing against the Spec.
+[[stages]]
+name = "research"
+type = "agent"
+agents = ["researcher-task"]
+on_fail = "research"
+
+# Kind -> Stage -> Agents. These replace the stage's own `agents` for Tasks of that Kind.
+[kinds.ui]
+implement = ["implementer-ui"]
+verify = ["verifier-web-playwright"]
+
+[kinds.api]
+review = ["reviewer-standards", "reviewer-spec", "reviewer-security"]
+verify = ["verifier-api"]
+
+[kinds.docs]
+implement = ["implementer-docs"]
+
+[breaker]
+per_stage = 3
+per_task = 6
+
+[notify]
+usage = "task"
+events = ["task_done", "request_done", "engine_error"]
+
+[lanes.normal]
+
+# Tasks estimated under this many lines take the fast lane. It skips the stages that list only
+# "normal" in `lanes` (Workup and its red check). The one-review-Round limit arrives with M10-T01.
+[lanes.fast]
+under_lines = 30
