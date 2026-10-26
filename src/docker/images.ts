@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { setTimeout } from "node:timers/promises";
 import { FOREMAN_DIR } from "../config/skill.ts";
 import { type Docker, DockerError, mustRun } from "./docker.ts";
 
@@ -67,8 +68,8 @@ export function proxyEnv(): Record<string, string> {
  * Safe to call before every Run. The proxy image must already be built. Returns once the proxy accepts connections.
  */
 export async function ensureEgress(docker: Docker, egress: Egress = EGRESS): Promise<void> {
-  await ensureNetwork(docker, egress.internalNetwork, ["--internal"]);
-  await ensureNetwork(docker, egress.outNetwork, []);
+  await ensureNetwork(docker, egress.internalNetwork, { internal: true });
+  await ensureNetwork(docker, egress.outNetwork, { internal: false });
 
   const state = await proxyState(docker, egress.proxyContainer);
   const starting = !state?.running;
@@ -110,14 +111,30 @@ async function waitForProxy(docker: Docker, container: string): Promise<void> {
       String(PROXY_PORT),
     ]);
     if (probe.code === 0) return;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await setTimeout(250);
   }
   throw new DockerError(`${container} did not start listening on port ${PROXY_PORT}`);
 }
 
-async function ensureNetwork(docker: Docker, name: string, flags: string[]): Promise<void> {
-  if ((await docker.run(["network", "inspect", name])).code === 0) return;
-  await mustRun(docker, ["network", "create", ...flags, name]);
+/**
+ * Creates the network if it is missing. One that exists must already be `internal` when it has to be:
+ * a `foreman-agents` made without `--internal` would let Agent containers reach out directly (ADR 0003).
+ */
+async function ensureNetwork(
+  docker: Docker,
+  name: string,
+  { internal }: { internal: boolean },
+): Promise<void> {
+  const found = await docker.run(["network", "inspect", "--format", "{{.Internal}}", name]);
+  if (found.code !== 0) {
+    await mustRun(docker, ["network", "create", ...(internal ? ["--internal"] : []), name]);
+    return;
+  }
+  if (internal && found.stdout.trim() !== "true") {
+    throw new DockerError(
+      `the Docker network ${name} exists but is not internal, so Agent containers could reach out directly: remove it with \`docker network rm ${name}\` and foreman recreates it`,
+    );
+  }
 }
 
 export interface ContainerState {

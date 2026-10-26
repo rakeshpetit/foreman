@@ -18,7 +18,14 @@ function setup() {
     home,
     docker,
     out,
-    run: () => runSmoke({ docker, home, user: "501:20", tmp, out: (l) => out.push(l) }),
+    run: () =>
+      runSmoke({
+        docker,
+        tokenFile: join(home, "claude.env"),
+        user: "501:20",
+        tmp,
+        out: (l) => out.push(l),
+      }),
   };
 }
 
@@ -118,6 +125,9 @@ describe("runSmoke", () => {
   it("names the missing token file", async () => {
     const { docker } = setup();
     const empty = tmpDir("foreman-smoke-empty-");
-    await assert.rejects(runSmoke({ docker, home: empty, out: () => {} }), /claude setup-token/);
+    await assert.rejects(
+      runSmoke({ docker, tokenFile: join(empty, "claude.env"), out: () => {} }),
+      /claude setup-token/,
+    );
   });
 });

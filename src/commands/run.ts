@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { ResolvedConfig } from "../config/layers.ts";
 import { configResolver, resolveConfig } from "../config/resolve.ts";
 import { agentExecutor } from "../engine/agent.ts";
@@ -18,7 +19,8 @@ import { writeStatus } from "../status/status.ts";
 import type { Store } from "../store/store.ts";
 
 export interface RunOptions {
-  home: string;
+  /** `$FOREMAN_HOME`: STATUS.md is written there and the raw output of every Run is kept in its `runs/` folder. */
+  foremanHome: string;
   untilIdle: boolean;
   runner: Runner;
   /** Request id → its resolved config (`resolveConfigs`). One missing here is resolved when its first Task runs. */
@@ -51,7 +53,7 @@ export async function runEngine(store: Store, opts: RunOptions): Promise<TickRes
       agent: agentExecutor({
         store,
         runner: opts.runner,
-        home: opts.home,
+        runsDir: join(opts.foremanHome, "runs"),
         config: configFor(task),
       }),
       gate,
@@ -61,7 +63,7 @@ export async function runEngine(store: Store, opts: RunOptions): Promise<TickRes
     const result = await tick(store, { pipelineFor: (task) => configFor(task).pipeline, executor });
     results.push(result);
     if (opts.notifier) await notifyTick(store, result, opts.notifier);
-    writeStatus(store, opts.home);
+    writeStatus(store, opts.foremanHome);
     if (result.kind !== "ran" && result.kind !== "escalated") break;
   } while (opts.untilIdle);
   return results;
@@ -69,7 +71,8 @@ export async function runEngine(store: Store, opts: RunOptions): Promise<TickRes
 
 async function notifyTick(store: Store, result: TickResult, notifier: Notifier): Promise<void> {
   if (result.kind === "error") return notifySafely(notifier, engineError(result.message));
-  if (result.kind === "usage-limit") return notifySafely(notifier, usageLimitPause(result.until));
+  if (result.kind === "usage-limit")
+    return notifySafely(notifier, usageLimitPause(result.ownerPause ? null : result.until));
   if (result.kind === "escalated") {
     return notifySafely(notifier, escalation(result.task, result.message));
   }

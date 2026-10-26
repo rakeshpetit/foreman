@@ -105,12 +105,13 @@ events       (id, at, type, subject, payload json)   -- append-only, used for re
 
 **The foreman repo**
 ```
-src/{cli,commands,engine,store,config,runner,gates,git,owner,notify,telegram,status}/
+src/{cli,commands,config,docker,engine,gates,git,notify,owner,runner,smoke,status,store,telegram}/
+src/importer/                     # `foreman import`: plan files into the store
 defaults/pipeline.toml            # foreman's default Pipeline
 agents/<name>/AGENT.md            # default Agent library
 skills/<name>/SKILL.md            # foreman-specific Skills (handoff format, verdict discipline)
-images/{base,web}/Dockerfile      # Agent images
-test/fakes/{claude,ntfy,telegram}/
+images/{base,egress-proxy}/       # Docker build contexts: the Agent image and the egress proxy; `web` arrives in M8
+test/fakes/{docker,ntfy,telegram}/  # the fake Telegram arrives in M6
 docs/{adr,plan}/  CONTEXT.md  README.md
 ```
 
@@ -143,9 +144,10 @@ docs/{adr,plan}/  CONTEXT.md  README.md
 - **Unit:** `engine.route` (pure), config merging and validation, AGENT.md parsing, each Gate against fixture repos, `status.render` snapshots.
 - **Store in tests:** `Store.memory()` opens a private in-memory SQLite database with every migration applied, so engine and command tests need no temp directory. Tests that go through the CLI use a temporary `FOREMAN_HOME` instead.
 - **Integration:**
-  - The fake `claude` is a script that reads `FAKE_CLAUDE_SCRIPT` (stage → files to write, verdict, usage, optional exit or usage-limit error). The fake Docker passes calls through to it on the host.
+  - `FakeDocker` (`test/fakes/docker/docker.ts`) plays `claude` in process, for unit and e2e tests. It answers the `docker` commands that the image, egress and Agent-run code issue, and a `docker run --rm` returns what `claude` prints: a passing stream from `claudeResult` unless a test replaces it.
+  - The `docker` shim (`test/fakes/docker/docker`) is a script on `PATH` for `CliDocker` and `ContainerRunner`, so their spawn and kill path runs for real. Its `run` prints the file named by `FAKE_CLAUDE_OUTPUT`, or sleeps until `docker kill` when that is unset.
   - Temporary git repos use a bare "remote".
-  - Fake ntfy and Telegram are local HTTP servers that record calls.
+  - The fake ntfy is a local HTTP server that records calls. The fake Telegram arrives in M6.
 - **End to end (one per Milestone from M1):** a scripted Request runs through `foreman run --until-idle`, and the test asserts on the final database, the git graph, `STATUS.md` and the notifications sent.
 - **Live smoke tests** (`npm run smoke`, run by hand and not part of `check`): one real `claude -p` in a container, one real ntfy, one real Telegram message.
 

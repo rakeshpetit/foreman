@@ -1,0 +1,58 @@
+#!/bin/sh
+# A stand-in for the `docker` CLI, to put first on PATH so CliDocker and ContainerRunner spawn a real
+# process. It knows only what the egress and Agent-run code issue (see FakeDocker for the same in-process).
+#
+#   FAKE_DOCKER_STATE   a directory it may write: `calls` (one line per invocation), `<name>.pid`
+#                       and `<name>.killed` for each `run --name`. Required.
+#   FAKE_CLAUDE_OUTPUT  a file `run` prints, as `claude` would. Absent: `run` sleeps until its
+#                       `kill` (or `rm -f`) arrives, then exits 137.
+#   FAKE_DOCKER_EXIT    the exit status of `run` when it prints (default 0).
+state="${FAKE_DOCKER_STATE:?FAKE_DOCKER_STATE is not set}"
+echo "$*" >> "$state/calls"
+
+# The value after `--name`, or the last argument.
+name=""
+prev=""
+for arg in "$@"; do
+  [ "$prev" = "--name" ] && name="$arg"
+  prev="$arg"
+done
+
+case "$1 $2" in
+  "info "*)
+    echo "27.0.0"
+    exit 0
+    ;;
+  "network inspect")
+    # {{.Internal}}: foreman-agents is internal.
+    echo true
+    exit 0
+    ;;
+  "container inspect")
+    echo "true|foreman-agents,foreman-egress,"
+    exit 0
+    ;;
+  "kill "* | "rm -f")
+    for last; do :; done
+    [ -e "$state/$last.pid" ] || { echo "Error: No such container: $last" >&2; exit 1; }
+    : > "$state/$last.killed"
+    echo "$last"
+    exit 0
+    ;;
+esac
+
+case "$1" in
+  run)
+    if [ -n "$FAKE_CLAUDE_OUTPUT" ]; then
+      cat "$FAKE_CLAUDE_OUTPUT"
+      exit "${FAKE_DOCKER_EXIT:-0}"
+    fi
+    echo $$ > "$state/$name.pid"
+    while [ ! -e "$state/$name.killed" ]; do sleep 0.05; done
+    exit 137
+    ;;
+  build | start | network | exec) exit 0 ;;
+esac
+
+echo "fake docker: unexpected command: docker $*" >&2
+exit 2

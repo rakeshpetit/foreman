@@ -11,6 +11,7 @@ import { importPlan } from "../importer/import.ts";
 import { ImportError } from "../importer/parse.ts";
 import { ntfyFromConfig } from "../notify/config.ts";
 import type { Notifier } from "../notify/notifier.ts";
+import { ContainerRunner, preflight, tokenFileOf } from "../runner/container.ts";
 import { FakeRunner, parseFakeScript } from "../runner/fake.ts";
 import type { Runner } from "../runner/runner.ts";
 import { render, writeStatus } from "../status/status.ts";
@@ -44,7 +45,8 @@ Commands:
   import <target-repo> <plan-dir>  Import a hand-written plan as a Request
   go <R>                           Approve a Request and start building
   run [--until-idle] [--fake <script.json>]
-                                   Run the engine (one tick, or until idle) with a FakeRunner
+                                   Run the engine (one tick, or until idle). Agents run in
+                                   containers, or with --fake are played from a script
   config show <R> [--task <T>]     Print a Request's resolved config and where each value came from
   images build                     Build the Agent base image and the egress proxy image
   status                           Print STATUS.md
@@ -161,14 +163,16 @@ async function dispatch(
         }
       }
       if (!runner) {
-        return fail(
-          ctx,
-          "No Runner yet: pass --fake <script.json> (the real Runner arrives in M3)",
-        );
+        // The real Runner: Agents run in containers. Refuse before any Task is marked active for a Run that cannot start.
+        const docker = ctx.docker ?? new CliDocker();
+        const tokenFile = tokenFileOf(home);
+        const problem = await preflight(docker, tokenFile);
+        if (problem) return fail(ctx, problem);
+        runner = new ContainerRunner({ docker, tokenFile });
       }
       const notifier = ctx.notifier ?? ntfyFromConfig(home, ctx.env);
       const results = await runEngine(store, {
-        home,
+        foremanHome: home,
         untilIdle: values["until-idle"] ?? false,
         runner,
         configs,
@@ -179,7 +183,13 @@ async function dispatch(
       ctx.out(`Ran ${ran} stage${ran === 1 ? "" : "s"}`);
       for (const r of results) {
         if (r.kind === "escalated") ctx.out(`${r.task} escalated in ${r.stage}: ${r.message}`);
-        if (r.kind === "usage-limit") ctx.out(`Usage limit reached: paused until ${r.until}`);
+        if (r.kind === "usage-limit") {
+          ctx.out(
+            r.ownerPause
+              ? "Usage limit reached: the queue stays paused until `foreman resume`"
+              : `Usage limit reached: paused until ${r.until}`,
+          );
+        }
       }
       const crashed = results.find((r) => r.kind === "error");
       if (crashed) {

@@ -40,7 +40,7 @@ function setup(script: ConstructorParameters<typeof FakeRunner>[0]) {
   const executor = agentExecutor({
     store: s,
     runner,
-    home: tmpDir("foreman-home-"),
+    runsDir: tmpDir("foreman-runs-"),
     config: stubConfig(PIPELINE),
   });
   return { dir, s, t, runner, executor };
@@ -75,7 +75,7 @@ test("FakeRunner writes scripted files, the report and returns usage", async () 
       {
         verdict: "PASS",
         files: { "src/a.txt": "hi" },
-        usage: { input_tokens: 5, output_tokens: 7 },
+        usage: { tokens_in: 5, tokens_out: 7 },
       },
     ],
   });
@@ -93,10 +93,10 @@ test("FakeRunner writes scripted files, the report and returns usage", async () 
   });
   assert.equal(result.verdict, "PASS");
   assert.deepEqual(result.usage, {
-    input_tokens: 5,
-    output_tokens: 7,
-    cache_read_input_tokens: 0,
-    cache_creation_input_tokens: 0,
+    tokens_in: 5,
+    tokens_out: 7,
+    cache_read: 0,
+    cache_write: 0,
     context_peak: null,
     cost_usd: 0,
   });
@@ -135,7 +135,7 @@ test("the executor runs each Task in its own Request's repo, not the first build
   const executor = agentExecutor({
     store: s,
     runner,
-    home: tmpDir("foreman-home-"),
+    runsDir: tmpDir("foreman-runs-"),
     config: stubConfig(PIPELINE),
   });
   assert.equal((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind, "ran");
@@ -147,7 +147,7 @@ test("the executor runs each Task in its own Request's repo, not the first build
 
 test("the executor records each Run with its verdict, usage and report, and the error when the Runner throws", async () => {
   const { dir, s, t, executor } = setup({
-    workup: [{ verdict: "PASS", usage: { input_tokens: 3, output_tokens: 4 } }],
+    workup: [{ verdict: "PASS", usage: { tokens_in: 3, tokens_out: 4 } }],
   });
   const task = s.getTask(t.id);
   assert.ok(task);
@@ -162,7 +162,7 @@ test("the executor records each Run with its verdict, usage and report, and the 
   assert.ok(run.report_path && existsSync(run.report_path));
 
   const boom = agentExecutor({
-    home: dir,
+    runsDir: dir,
     config: stubConfig(PIPELINE),
     store: s,
     runner: {
@@ -183,7 +183,7 @@ test('require = "all": one failing reviewer fails the Stage, every reviewer stil
   const executor = agentExecutor({
     store: s,
     runner,
-    home: tmpDir("foreman-home-"),
+    runsDir: tmpDir("foreman-runs-"),
     config: stubConfig(PIPELINE),
   });
   while ((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind === "ran") {
@@ -221,7 +221,7 @@ review = ["critic-a", "critic-b"]
   const executor = agentExecutor({
     store: s,
     runner,
-    home: tmpDir("foreman-home-"),
+    runsDir: tmpDir("foreman-runs-"),
     config: stubConfig(PIPELINE),
   });
   const task = s.getTask(t.id);
@@ -345,7 +345,7 @@ review = ["reviewer-standards"]
   const executor = agentExecutor({
     store: s,
     runner,
-    home: dir,
+    runsDir: dir,
     config: stubConfig(pipeline, ["reviewer-spec"], { [chosen.id]: { review: ["reviewer-spec"] } }),
   });
   const stage = pipeline.stages[0];
@@ -372,7 +372,7 @@ test("an Agent the config does not load fails the Run, which records the error",
   const executor = agentExecutor({
     store: s,
     runner,
-    home: tmpDir("foreman-home-"),
+    runsDir: tmpDir("foreman-runs-"),
     config: { ...stubConfig(PIPELINE), agents: new Map() },
   });
   await assert.rejects(executor(task, stageNamed("workup")), /unknown agent "writer"/);
@@ -416,7 +416,7 @@ function twoRequests(secondConfig: string) {
 
 test("a Request that starts building mid-run runs its Task with its own Target repo's Kinds", async () => {
   const w = twoRequests('[kinds.special]\nimplement = ["custom-impl"]\n');
-  const results = await runEngine(w.s, { home: w.dir, untilIdle: true, runner: w.runner });
+  const results = await runEngine(w.s, { foremanHome: w.dir, untilIdle: true, runner: w.runner });
   assert.deepEqual(results.at(-1), { kind: "idle" });
   assert.ok(w.s.listTasks().every((t) => t.status === "done"));
   const agentAt = (task: string) =>
@@ -427,7 +427,7 @@ test("a Request that starts building mid-run runs its Task with its own Target r
 
 test("a broken config found mid-run is a tick error with a stage.misconfigured event", async () => {
   const w = twoRequests('[kinds.special]\nimplement = ["no-such-agent"]\n');
-  const results = await runEngine(w.s, { home: w.dir, untilIdle: true, runner: w.runner });
+  const results = await runEngine(w.s, { foremanHome: w.dir, untilIdle: true, runner: w.runner });
   const last = results.at(-1);
   assert.equal(last?.kind, "error");
   assert.match(last?.kind === "error" ? last.message : "", /no-such-agent/);

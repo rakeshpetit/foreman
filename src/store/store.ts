@@ -479,6 +479,12 @@ export class Store {
     return q.paused && (q.paused_until === null || new Date(q.paused_until) > this.now());
   }
 
+  /** True while the Owner's own pause is on: paused, with no time to end it. A limit's pause has one. */
+  isPausedByOwner(): boolean {
+    const q = this.queueState();
+    return q.paused && q.paused_until === null;
+  }
+
   // events
   addEvent(type: string, subject?: string, payload?: unknown): void {
     this.db

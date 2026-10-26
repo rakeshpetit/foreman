@@ -18,10 +18,10 @@ export interface FakeStep {
 export type FakeScript = Record<string, FakeStep[]>;
 
 const NO_USAGE: Usage = {
-  input_tokens: 0,
-  output_tokens: 0,
-  cache_read_input_tokens: 0,
-  cache_creation_input_tokens: 0,
+  tokens_in: 0,
+  tokens_out: 0,
+  cache_read: 0,
+  cache_write: 0,
   context_peak: null,
   cost_usd: 0,
 };
@@ -75,7 +75,7 @@ export class FakeRunner implements Runner {
       verdict: step.verdict,
       reportPath: spec.reportPath,
       usage,
-      raw: JSON.stringify({ verdict: step.verdict, usage }),
+      stdout: JSON.stringify({ verdict: step.verdict, usage }),
     };
   }
 }

@@ -6,7 +6,7 @@ import { parsePipeline } from "../config/pipeline.ts";
 import { CliDocker, type Docker } from "../docker/docker.ts";
 import { buildImages } from "../docker/images.ts";
 import { agentExecutor } from "../engine/agent.ts";
-import { ContainerRunner } from "../runner/container.ts";
+import { ContainerRunner, tokenFileOf } from "../runner/container.ts";
 import { foremanHome, type RunRow, Store } from "../store/store.ts";
 
 const PIPELINE = parsePipeline(`
@@ -40,6 +40,7 @@ const RECORDED = [
   "tokens_out",
   "cache_read",
   "cache_write",
+  "context_peak",
   "cost_usd",
   "duration_ms",
   "exit_code",
@@ -48,8 +49,8 @@ const RECORDED = [
 
 export interface SmokeOptions {
   docker: Docker;
-  /** `$FOREMAN_HOME`: holds `claude.env`, the subscription token. */
-  home: string;
+  /** The subscription token: `claude.env` in `$FOREMAN_HOME`. */
+  tokenFile: string;
   /** The `uid:gid` the container runs as. Default: the host user's. */
   user?: string;
   /** Where the scratch repo and raw output go. Default: the system temp directory. */
@@ -65,7 +66,7 @@ export interface SmokeOptions {
  */
 export async function runSmoke({
   docker,
-  home,
+  tokenFile,
   user,
   tmp = tmpdir(),
   out,
@@ -73,8 +74,7 @@ export async function runSmoke({
   await buildImages(docker, { onBuilt: (image) => out(`Built ${image.name}`) });
 
   const repo = mkdtempSync(join(tmp, "foreman-smoke-repo-"));
-  // Stands in for `$FOREMAN_HOME` where the Run keeps its raw output; the token is read from `home`.
-  const runsHome = mkdtempSync(join(tmp, "foreman-smoke-home-"));
+  const runsDir = mkdtempSync(join(tmp, "foreman-smoke-runs-"));
   const store = Store.memory();
   let passed = false;
   try {
@@ -95,8 +95,8 @@ export async function runSmoke({
     if (!stage) throw new Error("the smoke Pipeline has no Stage");
     const executor = agentExecutor({
       store,
-      runner: new ContainerRunner({ docker, home, user }),
-      home: runsHome,
+      runner: new ContainerRunner({ docker, tokenFile, user }),
+      runsDir,
       config: { pipeline: PIPELINE, taskAgents: {}, agents, skillRoots: [] },
     });
     const verdict = await executor(task, stage);
@@ -105,7 +105,6 @@ export async function runSmoke({
     if (!row) throw new Error("the Run left no row");
     for (const [key, value] of Object.entries(row)) out(`${key}: ${value}`);
     if (verdict !== "PASS") throw new Error(`the Agent returned ${verdict}, not PASS`);
-    // `context_peak` is left out: a one-call Run has no `usage.iterations` to take it from.
     const unrecorded = RECORDED.filter((column) => row[column] == null);
     if (unrecorded.length > 0) throw new Error(`the row has no ${unrecorded.join(", ")}`);
     const hello = join(repo, "hello.md");
@@ -117,9 +116,9 @@ export async function runSmoke({
     store.close();
     if (passed) {
       rmSync(repo, { recursive: true, force: true });
-      rmSync(runsHome, { recursive: true, force: true });
+      rmSync(runsDir, { recursive: true, force: true });
     } else {
-      out(`kept for diagnosis: ${repo} (worktree), ${join(runsHome, "runs")} (raw output)`);
+      out(`kept for diagnosis: ${repo} (worktree), ${runsDir} (raw output)`);
     }
   }
 }
@@ -128,7 +127,7 @@ if (import.meta.main) {
   try {
     const row = await runSmoke({
       docker: new CliDocker(),
-      home: foremanHome(),
+      tokenFile: tokenFileOf(foremanHome()),
       out: (l) => console.log(l),
     });
     console.log(

@@ -110,7 +110,7 @@ test("a hung ntfy server delays a tick by no more than the timeout, and the fail
     const notifier = new NtfyNotifier({ server: url, topic: "t", timeoutMs: 200 });
     const started = Date.now();
     const results = await runEngine(seed(), {
-      home: dir,
+      foremanHome: dir,
       untilIdle: true,
       runner: new FakeRunner(),
       notifier,
@@ -158,7 +158,7 @@ usage_topic = "usage-topic"
 `);
   fake.calls.length = 0;
   await runEngine(seed(), {
-    home: dir,
+    foremanHome: dir,
     untilIdle: true,
     runner: new FakeRunner(),
     notifier: ntfyFromConfig(dir, {}),
@@ -179,7 +179,7 @@ test("a Runner that throws sends one engine-error ping, rewrites STATUS.md, stop
   };
   fake.calls.length = 0;
   const results = await runEngine(store, {
-    home: dir,
+    foremanHome: dir,
     untilIdle: true,
     runner,
     notifier,
@@ -215,7 +215,7 @@ test("an Escalation parks its Task, sends one high-priority ping and lets the lo
   };
   fake.calls.length = 0;
   const results = await runEngine(store, {
-    home: home(),
+    foremanHome: home(),
     untilIdle: true,
     runner,
     notifier,
@@ -238,17 +238,18 @@ test("a usage limit pauses the queue, sends one ping on the main topic and stops
   const runner: Runner = {
     run: async () => {
       calls++;
-      throw new RunFailure(
-        "usage-limit",
-        "You've hit your 5-hour usage limit",
-        "",
-        undefined,
-        reset,
-      );
+      throw new RunFailure("usage-limit", "You've hit your 5-hour usage limit", {
+        resetsAt: reset,
+      });
     },
   };
   fake.calls.length = 0;
-  const results = await runEngine(store, { home: home(), untilIdle: true, runner, notifier });
+  const results = await runEngine(store, {
+    foremanHome: home(),
+    untilIdle: true,
+    runner,
+    notifier,
+  });
   assert.deepEqual(
     results.map((r) => r.kind),
     ["usage-limit"],
@@ -264,6 +265,39 @@ test("a usage limit pauses the queue, sends one ping on the main topic and stops
 
   // Paused ticks do not send it again.
   fake.calls.length = 0;
-  await runEngine(store, { home: home(), untilIdle: true, runner, notifier });
+  await runEngine(store, { foremanHome: home(), untilIdle: true, runner, notifier });
   assert.equal(fake.calls.length, 0);
+});
+
+test("a usage limit during the Owner's pause sends a ping that names `foreman resume`, with no reset time, and keeps the pause", async () => {
+  const store = seed();
+  const reset = new Date(Date.now() + 3_600_000);
+  const runner: Runner = {
+    run: async () => {
+      // The Owner pauses while the Run is in flight.
+      store.setQueueState({ paused: true, paused_until: null, reason: "paused by owner" });
+      throw new RunFailure("usage-limit", "You've hit your 5-hour usage limit", {
+        resetsAt: reset,
+      });
+    },
+  };
+  fake.calls.length = 0;
+  const results = await runEngine(store, {
+    foremanHome: home(),
+    untilIdle: true,
+    runner,
+    notifier,
+  });
+  assert.equal(results[0]?.kind === "usage-limit" && results[0].ownerPause, true);
+  assert.equal(fake.calls.length, 1);
+  const [ping] = fake.calls;
+  assert.equal(ping?.title, usageLimitPause(null).title);
+  assert.match(ping?.body ?? "", /foreman resume/);
+  assert.doesNotMatch(ping?.body ?? "", /\d{4}-\d{2}-\d{2}/);
+  assert.equal(ping?.body?.includes(reset.toISOString()), false);
+  assert.deepEqual(store.queueState(), {
+    paused: true,
+    paused_until: null,
+    reason: "paused by owner",
+  });
 });

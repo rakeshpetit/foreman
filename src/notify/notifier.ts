@@ -37,9 +37,13 @@ export const escalation = (task: string, message: string): Notification => ({
   tags: ["sos"],
 });
 
-export const usageLimitPause = (until: string): Notification => ({
+/** `until` is when the limit resets, or null when the Owner's own pause was on and so stays on. */
+export const usageLimitPause = (until: string | null): Notification => ({
   title: "Foreman paused: usage limit",
-  message: `The usage limit was reached. The queue is paused until ${until}.`,
+  message:
+    until === null
+      ? "The usage limit was reached. The queue stays paused until `foreman resume`."
+      : `The usage limit was reached. The queue is paused until ${until}.`,
   tags: ["hourglass_flowing_sand"],
 });
 

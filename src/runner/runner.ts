@@ -1,15 +1,15 @@
 import type { Stage } from "../engine/route.ts";
 import type { Verdict } from "../engine/verdict.ts";
 
-/** What a Run used. Token counts are named as Claude names them. */
+/** What a Run used, named for the `runs` columns it fills. */
 export interface Usage {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_input_tokens: number;
-  cache_creation_input_tokens: number;
+  tokens_in: number;
+  tokens_out: number;
+  cache_read: number;
+  cache_write: number;
   /**
-   * The fullest context of the model calls the result lists, in tokens. Claude's result lists only
-   * the last call, so this is that call's context: an approximation of the peak. Null when absent.
+   * The fullest context of any call to the model in the Run, in tokens: the largest of input plus
+   * both caches over Claude's `assistant` messages. Null when the Run made no call.
    */
   context_peak: number | null;
   /** At list price. */
@@ -49,7 +49,6 @@ export interface RunSpec {
   tools?: string[];
   /** Wall-clock limit for the Run, in milliseconds. */
   timeoutMs?: number;
-  maxTokens?: number;
 }
 
 export interface RunResult {
@@ -59,7 +58,7 @@ export interface RunResult {
   /** The model that did the work, as Claude names it. Absent: the Runner could not tell. */
   model?: string;
   /** What the Run printed, for the caller to keep. */
-  raw: string;
+  stdout: string;
 }
 
 export interface Runner {
@@ -81,20 +80,31 @@ export type RunFailureKind =
   /** It left a Verdict but not the report its Output contract asks for. */
   | "missing-report";
 
+/** What a failed Run knows beyond its kind and message. Every field is optional. */
+export interface RunFailureDetails {
+  /** Everything the container printed, for the caller to keep. */
+  stdout?: string;
+  /** What the Run spent before it failed, when its output says. */
+  usage?: Usage;
+  /** `docker run`'s exit code, when the container got far enough to have one. */
+  exitCode?: number;
+  /** For `usage-limit`: when the limit resets, if the output says. */
+  resetsAt?: Date;
+}
+
 export class RunFailure extends Error {
   readonly kind: RunFailureKind;
-  /** Everything the container printed, for the caller to keep. */
   readonly stdout: string;
-  /** What the Run spent before it failed, when its output says. */
   readonly usage?: Usage;
-  /** For `usage-limit`: when the limit resets, if the output says. */
+  readonly exitCode?: number;
   readonly resetsAt?: Date;
 
-  constructor(kind: RunFailureKind, message: string, stdout = "", usage?: Usage, resetsAt?: Date) {
+  constructor(kind: RunFailureKind, message: string, details: RunFailureDetails = {}) {
     super(message);
     this.kind = kind;
-    this.stdout = stdout;
-    this.usage = usage;
-    this.resetsAt = resetsAt;
+    this.stdout = details.stdout ?? "";
+    this.usage = details.usage;
+    this.exitCode = details.exitCode;
+    this.resetsAt = details.resetsAt;
   }
 }

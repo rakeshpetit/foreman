@@ -245,3 +245,21 @@ test("CliDocker returns a non-zero exit as a result", async () => {
   const r = await new CliDocker().run(["network", "inspect", "foreman-does-not-exist"]);
   assert.notEqual(r.code, 0);
 });
+
+test("ensureEgress refuses a foreman-agents network that is not internal", async () => {
+  const docker = new FakeDocker();
+  docker.networks.add(EGRESS.internalNetwork);
+  docker.openNetworks.add(EGRESS.internalNetwork);
+  await assert.rejects(
+    ensureEgress(docker),
+    (e) => e instanceof DockerError && /docker network rm foreman-agents/.test(e.message),
+  );
+  assert.equal(docker.callsStarting("run").length, 0);
+});
+
+test("ensureEgress creates foreman-agents internal, and accepts it on the next call", async () => {
+  const docker = new FakeDocker();
+  await ensureEgress(docker);
+  assert.equal(docker.openNetworks.has(EGRESS.internalNetwork), false);
+  await ensureEgress(docker);
+});

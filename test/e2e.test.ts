@@ -18,10 +18,10 @@ test("tracer: import → go → run --until-idle on the default Pipeline, with a
   const server = await ntfy.start();
   try {
     const runner = new FakeRunner({
-      "implementer-tdd": [{ verdict: "PASS", usage: { input_tokens: 5, output_tokens: 6 } }],
+      "implementer-tdd": [{ verdict: "PASS", usage: { tokens_in: 5, tokens_out: 6 } }],
       "reviewer-standards": [
-        { verdict: "FAIL", usage: { input_tokens: 11, output_tokens: 22 } },
-        { verdict: "PASS", usage: { input_tokens: 33, output_tokens: 44 } },
+        { verdict: "FAIL", usage: { tokens_in: 11, tokens_out: 22 } },
+        { verdict: "PASS", usage: { tokens_in: 33, tokens_out: 44 } },
       ],
     });
     const { root, home, run } = cli({

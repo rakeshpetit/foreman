@@ -10,7 +10,7 @@ import { UsageLimit } from "../src/engine/usage-limit.ts";
 import { ContainerRunner } from "../src/runner/container.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
 import { RunFailure, type Runner, type RunResult } from "../src/runner/runner.ts";
-import { FakeDocker } from "./fakes/docker/docker.ts";
+import { claudeResult, FakeDocker, rateLimitLine } from "./fakes/docker/docker.ts";
 import {
   buildingRequest,
   closeStores,
@@ -39,7 +39,7 @@ implement = ["coder"]
 review = ["critic"]
 `);
 
-const FIXTURE = readFileSync(join(import.meta.dirname, "fixtures/claude/result.json"), "utf8");
+const FIXTURE = readFileSync(join(import.meta.dirname, "fixtures/claude/stream.jsonl"), "utf8");
 
 function setup() {
   const dir = tmpDir("foreman-recording-");
@@ -83,14 +83,14 @@ function scripted(outcomes: (RunFailure | Error | Partial<RunResult> | "no-repor
         verdict: "PASS",
         reportPath: spec.reportPath,
         usage: {
-          input_tokens: 1,
-          output_tokens: 2,
-          cache_read_input_tokens: 3,
-          cache_creation_input_tokens: 4,
+          tokens_in: 1,
+          tokens_out: 2,
+          cache_read: 3,
+          cache_write: 4,
           context_peak: 5,
           cost_usd: 0.5,
         },
-        raw: '{"raw":true}',
+        stdout: '{"raw":true}',
         ...(outcome === "no-report" ? {} : outcome),
       };
     },
@@ -110,8 +110,12 @@ describe("recording a Run", () => {
       writeFileSync(report, "# report");
       return { code: 0, stdout: FIXTURE, stderr: "" };
     };
-    const runner = new ContainerRunner({ docker, home, user: "501:20" });
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const runner = new ContainerRunner({
+      docker,
+      tokenFile: join(home, "claude.env"),
+      user: "501:20",
+    });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     assert.equal(await executor(task(), stage("implement")), "PASS");
 
     const [row] = s.listRuns(t.id);
@@ -141,9 +145,9 @@ describe("recording a Run", () => {
         verdict: "PASS",
         tokens_in: 9,
         tokens_out: 410,
-        cache_read: 12000,
-        cache_write: 3500,
-        context_peak: 11494,
+        cache_read: 22800,
+        cache_write: 11937,
+        context_peak: 11941,
         cost_usd: 0.0412,
         exit_code: 0,
         report_path: join(repo, ".foreman/R-1/runs/1-implement.md"),
@@ -153,7 +157,7 @@ describe("recording a Run", () => {
     assert.ok(row.started_at && row.ended_at);
     assert.equal(typeof row.duration_ms, "number");
     assert.ok(existsSync(row.report_path ?? ""));
-    // The raw JSON is kept under the foreman home, named for the Run.
+    // The whole stream is kept under the foreman home, named for the Run.
     assert.equal(readFileSync(join(home, "runs", `${row.id}.json`), "utf8"), FIXTURE);
   });
 
@@ -162,10 +166,12 @@ describe("recording a Run", () => {
     const coder = config.agents.get("coder");
     assert.ok(coder);
     config.agents.set("coder", { ...coder, agent: { ...coder.agent, model: "opus" } });
-    await agentExecutor({ store: s, runner: new FakeRunner(), home, config })(
-      task(),
-      stage("implement"),
-    );
+    await agentExecutor({
+      store: s,
+      runner: new FakeRunner(),
+      runsDir: join(home, "runs"),
+      config,
+    })(task(), stage("implement"));
     assert.equal(s.listRuns(t.id)[0]?.model, "opus");
   });
 });
@@ -173,8 +179,11 @@ describe("recording a Run", () => {
 describe("infrastructure failures", () => {
   it("retries a Run that left no valid Verdict once, and the retry's result stands", async () => {
     const { s, t, task, stage, home, config } = setup();
-    const runner = scripted([new RunFailure("invalid-result", "no Verdict", "garbled"), {}]);
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const runner = scripted([
+      new RunFailure("invalid-result", "no Verdict", { stdout: "garbled" }),
+      {},
+    ]);
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     assert.equal(await executor(task(), stage("implement")), "PASS");
     assert.equal(runner.calls, 2);
     const [first, second] = s.listRuns(t.id);
@@ -195,15 +204,18 @@ describe("infrastructure failures", () => {
     mkdirSync(home, { recursive: true });
     writeFileSync(join(home, "runs"), "in the way");
     const usage = {
-      input_tokens: 7,
-      output_tokens: 8,
-      cache_read_input_tokens: 9,
-      cache_creation_input_tokens: 10,
+      tokens_in: 7,
+      tokens_out: 8,
+      cache_read: 9,
+      cache_write: 10,
       context_peak: 11,
       cost_usd: 0.25,
     };
-    const runner = scripted([new RunFailure("invalid-result", "bad Verdict", "x", usage), {}]);
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const runner = scripted([
+      new RunFailure("invalid-result", "bad Verdict", { stdout: "x", usage }),
+      {},
+    ]);
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     const log = mock.method(console, "error", () => {});
     try {
       assert.equal(await executor(task(), stage("implement")), "PASS");
@@ -220,7 +232,7 @@ describe("infrastructure failures", () => {
   it("treats a Verdict with no report as a failure, keeping the usage it spent", async () => {
     const { s, t, task, stage, home, config } = setup();
     const runner = scripted(["no-report", {}]);
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     assert.equal(await executor(task(), stage("implement")), "PASS");
     const [first, second] = s.listRuns(t.id);
     assert.match(first?.error ?? "", /left no report at .*1-implement\.md/);
@@ -231,11 +243,43 @@ describe("infrastructure failures", () => {
     assert.equal(second?.verdict, "PASS");
   });
 
+  it("records the exit code of a container that failed, through the ContainerRunner", async () => {
+    const { s, t, task, stage, home, config } = setup();
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "claude.env"), "CLAUDE_CODE_OAUTH_TOKEN=sk-test\n");
+    const docker = new FakeDocker();
+    docker.claude = () => ({ code: 3, stdout: "", stderr: "boom" });
+    const runner = new ContainerRunner({
+      docker,
+      tokenFile: join(home, "claude.env"),
+      user: "501:20",
+    });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
+    await assert.rejects(executor(task(), stage("implement")), Escalation);
+    const runs = s.listRuns(t.id);
+    assert.equal(runs.length, 2);
+    for (const run of runs) {
+      assert.equal(run.exit_code, 3);
+      assert.match(run.error ?? "", /exited 3/);
+    }
+  });
+
+  it("leaves exit_code empty when the Run never got an exit code", async () => {
+    const { s, t, task, stage, home, config } = setup();
+    const runner = scripted([new RunFailure("failed", "docker run failed"), {}]);
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
+    assert.equal(await executor(task(), stage("implement")), "PASS");
+    assert.deepEqual(
+      s.listRuns(t.id).map((r) => r.exit_code),
+      [null, 0],
+    );
+  });
+
   it("retries a timeout and a failed container the same way", async () => {
     for (const kind of ["timeout", "failed"] as const) {
       const { s, task, stage, home, config } = setup();
       const runner = scripted([new RunFailure(kind, "boom"), {}]);
-      const executor = agentExecutor({ store: s, runner, home, config });
+      const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
       assert.equal(await executor(task(), stage("implement")), "PASS", kind);
       assert.equal(runner.calls, 2, kind);
     }
@@ -248,7 +292,7 @@ describe("infrastructure failures", () => {
       new RunFailure("invalid-result", "second"),
       {},
     ]);
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     await assert.rejects(
       executor(task(), stage("implement")),
       (e) =>
@@ -271,7 +315,7 @@ describe("infrastructure failures", () => {
     for (const failure of [new RunFailure("auth", "401"), new Error("setup")]) {
       const { s, t, task, stage, home, config } = setup();
       const runner = scripted([failure, {}]);
-      const executor = agentExecutor({ store: s, runner, home, config });
+      const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
       await assert.rejects(executor(task(), stage("implement")), failure);
       assert.equal(runner.calls, 1);
       assert.equal(s.listRuns(t.id).length, 1);
@@ -284,7 +328,7 @@ describe("infrastructure failures", () => {
       new RunFailure("invalid-result", "a"),
       new RunFailure("invalid-result", "b"),
     ]);
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     const result = await tick(s, { pipelineFor: () => PIPELINE, executor });
     assert.equal(result.kind, "escalated");
     assert.ok(result.kind === "escalated" && result.task === t.id);
@@ -306,13 +350,16 @@ describe("a usage limit", () => {
   const RESET = new Date("2026-10-26T20:00:00Z");
   const NOW = new Date("2026-10-26T15:00:00Z");
   const limit = (resetsAt?: Date) =>
-    new RunFailure("usage-limit", "You've hit your 5-hour usage limit", "raw", undefined, resetsAt);
+    new RunFailure("usage-limit", "You've hit your 5-hour usage limit", {
+      stdout: "raw",
+      resetsAt,
+    });
 
   it("is not retried: it throws a UsageLimit that carries the reset time, and the Run's row says why", async () => {
     const { s, t, task, stage, home, config } = setup();
     s.now = () => NOW;
     const runner = scripted([limit(RESET), {}]);
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     await assert.rejects(
       executor(task(), stage("implement")),
       (e) => e instanceof UsageLimit && e.resetsAt.getTime() === RESET.getTime(),
@@ -323,6 +370,36 @@ describe("a usage limit", () => {
     assert.equal(readFileSync(join(home, "runs", `${run?.id}.json`), "utf8"), "raw");
   });
 
+  it("comes from a rejected rate_limit_event in Claude's stream, with that event's reset time", async () => {
+    const { s, t, task, stage, home, config } = setup();
+    s.now = () => NOW;
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "claude.env"), "CLAUDE_CODE_OAUTH_TOKEN=sk-test\n");
+    const docker = new FakeDocker();
+    const stdout = claudeResult(
+      {
+        is_error: true,
+        result: "You've hit your 5-hour usage limit",
+        structured_output: undefined,
+      },
+      [rateLimitLine("rejected", RESET.getTime() / 1000)],
+    );
+    docker.claude = () => ({ code: 1, stdout, stderr: "" });
+    const runner = new ContainerRunner({
+      docker,
+      tokenFile: join(home, "claude.env"),
+      user: "501:20",
+    });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
+    await assert.rejects(
+      executor(task(), stage("implement")),
+      (e) => e instanceof UsageLimit && e.resetsAt.getTime() === RESET.getTime(),
+    );
+    assert.equal(docker.callsStarting("run", "--rm").length, 1);
+    const [run] = s.listRuns(t.id);
+    assert.equal(readFileSync(join(home, "runs", `${run?.id}.json`), "utf8"), stdout);
+  });
+
   it("falls back to a fixed pause when the reset time is missing or already past", async () => {
     for (const resetsAt of [undefined, new Date(NOW.getTime() - 1000)]) {
       const { s, task, stage, home, config } = setup();
@@ -330,7 +407,7 @@ describe("a usage limit", () => {
       const executor = agentExecutor({
         store: s,
         runner: scripted([limit(resetsAt)]),
-        home,
+        runsDir: join(home, "runs"),
         config,
       });
       await assert.rejects(
@@ -344,13 +421,14 @@ describe("a usage limit", () => {
     const { s, t, stage, home, config } = setup();
     s.now = () => NOW;
     const runner = scripted([limit(RESET), {}]);
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     const result = await tick(s, { pipelineFor: () => PIPELINE, executor });
     assert.deepEqual(result, {
       kind: "usage-limit",
       task: t.id,
       stage: stage("implement").name,
       until: RESET.toISOString(),
+      ownerPause: false,
     });
     const task = s.getTask(t.id);
     assert.deepEqual(
@@ -385,7 +463,7 @@ describe("a usage limit", () => {
         throw limit(RESET);
       },
     };
-    const executor = agentExecutor({ store: s, runner, home, config });
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
     await tick(s, { pipelineFor: () => PIPELINE, executor });
     assert.deepEqual(s.queueState(), {
       paused: true,
@@ -394,13 +472,40 @@ describe("a usage limit", () => {
     });
   });
 
+  it("tells the result the Owner's pause was kept, and a limit's own pause was not", async () => {
+    const { s, home, config } = setup();
+    s.now = () => NOW;
+    const runner: Runner = {
+      run: async () => {
+        if (!s.isPaused()) s.setQueueState({ paused: true, paused_until: null, reason: "o" });
+        throw limit(RESET);
+      },
+    };
+    const executor = agentExecutor({ store: s, runner, runsDir: join(home, "runs"), config });
+    const kept = await tick(s, { pipelineFor: () => PIPELINE, executor });
+    assert.equal(kept.kind === "usage-limit" && kept.ownerPause, true);
+
+    s.setQueueState({ paused: false, paused_until: null, reason: null });
+    const own = await tick(s, {
+      pipelineFor: () => PIPELINE,
+      executor: agentExecutor({
+        store: s,
+        runner: scripted([limit(RESET)]),
+        runsDir: join(home, "runs"),
+        config,
+      }),
+    });
+    assert.equal(own.kind === "usage-limit" && own.ownerPause, false);
+    assert.equal(s.isPausedByOwner(), false);
+  });
+
   it("is overridden by `resume`, which clears the pause before the reset", async () => {
     const { s, t, home, config } = setup();
     s.now = () => NOW;
     const executor = agentExecutor({
       store: s,
       runner: scripted([limit(RESET), {}]),
-      home,
+      runsDir: join(home, "runs"),
       config,
     });
     await tick(s, { pipelineFor: () => PIPELINE, executor });

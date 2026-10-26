@@ -10,6 +10,7 @@ import {
   type Pipeline,
   parsePipeline,
 } from "../src/config/pipeline.ts";
+import type { Docker } from "../src/docker/docker.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
 import { Store } from "../src/store/store.ts";
 
@@ -149,9 +150,12 @@ export function stubConfig(
 
 /**
  * `main` run against a fresh Target repo in a temp directory, with its own FOREMAN_HOME.
- * `env` is added to FOREMAN_HOME; `runner` replaces the default FakeRunner.
+ * `env` is added to FOREMAN_HOME; `runner` replaces the default FakeRunner. With `docker`, `run`
+ * gets no Runner, so `foreman run` builds its ContainerRunner on that Docker.
  */
-export function cli(opts: { env?: Record<string, string>; runner?: FakeRunner } = {}) {
+export function cli(
+  opts: { env?: Record<string, string>; runner?: FakeRunner; docker?: Docker } = {},
+) {
   const root = tmpDir("foreman-e2e-");
   const home = join(root, "home");
   const out: string[] = [];
@@ -163,7 +167,8 @@ export function cli(opts: { env?: Record<string, string>; runner?: FakeRunner } 
       cwd: root,
       out: (l) => out.push(l),
       err: (l) => err.push(l),
-      runner,
+      runner: opts.docker ? undefined : runner,
+      docker: opts.docker,
     });
   return { root, home, out, err, run, runner };
 }

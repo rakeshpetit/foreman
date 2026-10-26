@@ -71,7 +71,6 @@ export function assembleRunSpec(input: RunSpecInput): RunSpec {
     ...(agent.image && { image: agent.image }),
     ...(agent.tools && { tools: agent.tools }),
     ...(agent.timeout && { timeoutMs: durationMs(agent.timeout) }),
-    ...(agent.max_tokens && { maxTokens: agent.max_tokens }),
     skills: [...skills.preload, ...skills.available].map(({ name, dir }) => ({ name, dir })),
   };
 }

@@ -153,7 +153,6 @@ describe("assembleRunSpec", () => {
       image: "foreman-base",
       tools: ["Read", "Edit", "Bash"],
       timeoutMs: 45 * 60_000,
-      maxTokens: 400000,
       skills: [
         { name: "tdd", dir: "/skills/tdd" },
         { name: "handoff", dir: "/skills/handoff" },
@@ -166,7 +165,7 @@ describe("assembleRunSpec", () => {
     const spec = assembleRunSpec(
       input({ agent: NO_SKILLS, skills: { preload: [], available: [] } }),
     );
-    for (const key of ["model", "effort", "image", "tools", "timeoutMs", "maxTokens"]) {
+    for (const key of ["model", "effort", "image", "tools", "timeoutMs"]) {
       assert.ok(!(key in spec), key);
     }
   });

@@ -198,6 +198,7 @@ This file is also the input format for `foreman import` (M1-T02). From M6 on, fo
   - Every `RunFailure` (timeout, failed container, invalid Verdict) and a Verdict with no report is an infrastructure failure: one retry in the same tick, each attempt its own `runs` row, then an Escalation. Until M5-T06 an Escalation is a `parked` Task, a `task.escalated` event and a high-priority ntfy; the engine goes on to the next Task. M5-T06 must also let a parked Task's dependants proceed once it is answered.
   - A bad token (`auth`: 401 or "Not logged in") is not retried and parks nothing: the engine stops with an engine-error ntfy, and the Task stays queued, for the Owner to fix the token.
   - The context peak is the largest context among the calls in `usage.iterations`. Claude's result lists only the last call, so this approximates the peak; exact numbers need `stream-json` (not done).
+  - M3-T09 replaced the `usage.iterations` approximation: the Runner reads `stream-json`, and the context peak is exact.
   - The report is not copied: the Agent already writes it to `<target repo>/.foreman/R-n/runs/`. M4-T02 commits it from the worktree.
   - M3-T06's usage-limit check must run before the retry, or a limit will be retried and escalated.
 
@@ -207,6 +208,7 @@ This file is also the input format for `foreman import` (M1-T02). From M6 on, fo
 - **Done when:** a scripted limit error pauses the queue, the Task is not charged a Round, and the queue resumes after the (faked) clock passes the reset time.
 - **Decisions:**
   - The Runner recognises a limit by Claude's `is_error` text ("You've hit/reached your … limit"), not by `rate_limit_event`: the Runner uses `--output-format json`, whose result carries no such event. The reset time is the first `"resetsAt"` (epoch seconds) in the output, if any. Both are inferred from the spike, not seen, and must be confirmed against the first real limit.
+  - M3-T09 replaced the text match and the `resetsAt` search: the Runner reads `stream-json`, takes a limit from a `rate_limit_event` that is not `allowed`, and uses that event's `resetsAt`. The text match stays only as the fallback for a stream with no such event.
   - A limit is never retried and never escalates: `tick` pauses the queue (`paused_until` = reset, reason, a `queue.paused` event), puts the Task back to `queued` at the same Stage with no Round, and `runEngine` sends one main-topic ntfy and stops.
   - With no reset time, or one not in the future, the pause is a fixed 30 minutes; if the limit is still on, the next Run pauses again.
   - An Owner's `foreman pause` set while the Run was in flight is kept: the limit does not turn it into a timed pause.

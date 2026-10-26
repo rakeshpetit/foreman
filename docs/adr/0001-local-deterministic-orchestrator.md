@@ -14,7 +14,7 @@ Foreman is modelled on CockroachDB's [MOLT Sinai pipeline](https://www.cockroach
 - **One Task at a time** (`max_parallel = 1`). The seam for parallel worktrees is left open.
 - **Started by hand:** `foreman run` in tmux under `caffeinate`, like `pi-remote` in the knowledge repo. A launchd daemon comes later, once it runs reliably.
 - **A Sweeper** re-queues stalled Stages on a timer.
-- **Usage limits pause the queue.** When the subscription limit is hit, foreman pauses until the reset time, sends one ntfy and resumes on its own. The reset time is `resetsAt` (epoch seconds) in the `rate_limit_event` that `stream-json` emits. This is to be confirmed: a real limit has not yet been observed ([spike](../spikes/claude-in-container.md#errors)).
+- **Usage limits pause the queue.** When the subscription limit is hit, foreman pauses until the reset time, sends one ntfy and resumes on its own. The reset time is `resetsAt` (epoch seconds) in the `rate_limit_event` that `stream-json` emits. Built in M3-T09: the Runner reads Claude's `stream-json` output and takes a limit from a `rate_limit_event` whose `rate_limit_info.status` is not `allowed` (a nearing-limit `allowed_warning` does not count), with that event's `resetsAt`. A stream with no such event (only the `allowed` one a Run starts with, say) falls back to matching the `is_error` text, which gives no reset time, so the pause is a fixed 30 minutes. This is still to be confirmed against a real limit, which has not yet been observed ([spike](../spikes/claude-in-container.md#errors)).
 - **TypeScript,** because the Owner is a React Native developer who debugs TS fastest, and a future web dashboard can share its types.
 
 ## Considered options

@@ -131,8 +131,11 @@ test("creates and reads every entity", () => {
   assert.equal(s.isPaused(), false);
   s.setQueueState({ paused: true, paused_until: "2030-01-01", reason: "limit" });
   assert.deepEqual(s.queueState(), { paused: true, paused_until: "2030-01-01", reason: "limit" });
+  assert.equal(s.isPausedByOwner(), false);
+  assert.equal(s.isPausedByOwner(), false);
   s.setQueueState({ paused: true, paused_until: null, reason: "owner" });
   assert.equal(s.isPaused(), true);
+  assert.equal(s.isPausedByOwner(), true);
   s.setQueueState({ paused: false, paused_until: null, reason: null });
   assert.equal(s.isPaused(), false);
 });

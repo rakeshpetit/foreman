@@ -1,15 +1,15 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { agentsFor } from "../config/agents.ts";
 import type { ResolvedConfig } from "../config/layers.ts";
 import type { StageConfig } from "../config/pipeline.ts";
 import { resolveSkills } from "../config/skill.ts";
 import { assembleRunSpec, type BlockingFinding, type PriorReport } from "../runner/prompt.ts";
-import { RunFailure, type Runner, type Usage } from "../runner/runner.ts";
-import type { RunRow, Store, TaskRow } from "../store/store.ts";
+import { RunFailure, type Runner } from "../runner/runner.ts";
+import type { Store, TaskRow } from "../store/store.ts";
 import { blockingFindings, priorReports } from "./context.ts";
 import { Escalation } from "./escalation.ts";
+import { openRun } from "./recording.ts";
 import type { StageExecutor } from "./tick.ts";
 import { UsageLimit } from "./usage-limit.ts";
 import { isRouted, type Verdict } from "./verdict.ts";
@@ -17,10 +17,21 @@ import { isRouted, type Verdict } from "./verdict.ts";
 export interface AgentExecutorOptions {
   store: Store;
   runner: Runner;
-  /** `$FOREMAN_HOME`: the raw output of every Run is kept in its `runs/` folder, named for the Run. */
-  home: string;
+  /** Where the raw output of every Run is kept, named for the Run (`<runsDir>/<id>.json`). */
+  runsDir: string;
+  /** Where a failure to keep the raw output is reported. Default: stderr. */
+  log?: (msg: string) => void;
   /** The Task's Request's config: the Pipeline that picks each Stage's Agents, and the Agents and Skills to load. */
   config: Pick<ResolvedConfig, "pipeline" | "taskAgents" | "agents" | "skillRoots">;
+}
+
+/** What one Agent's Run needs: the Stage's Task, which Agent, and what earlier Runs left. */
+interface Assignment {
+  opts: AgentExecutorOptions;
+  task: TaskRow;
+  stage: StageConfig;
+  agentName: string;
+  history: History;
 }
 
 /** What earlier Runs of the Task left for the Stage's Agents to read. */
@@ -52,7 +63,7 @@ export function agentExecutor(opts: AgentExecutorOptions): StageExecutor {
       findings: blockingFindings(opts.store, opts.config, task, stage),
     };
     for (const agent of agents) {
-      const verdict = await runAgent(opts, task, stage, agent, history);
+      const verdict = await runAgent({ opts, task, stage, agentName: agent, history });
       if (!isRouted(verdict)) return verdict;
       if (verdict === "PASS") {
         passed++;
@@ -69,16 +80,11 @@ const ATTEMPTS = 2;
 /** How long to pause for a usage limit whose reset time is unknown, or not in the future. */
 const FALLBACK_PAUSE_MS = 30 * 60_000;
 
-async function runAgent(
-  opts: AgentExecutorOptions,
-  task: TaskRow,
-  stage: StageConfig,
-  agentName: string,
-  history: History,
-): Promise<Verdict> {
+async function runAgent(assignment: Assignment): Promise<Verdict> {
+  const { opts, task, stage, agentName } = assignment;
   for (let attempt = 1; ; attempt++) {
     try {
-      return await attemptRun(opts, task, stage, agentName, history);
+      return await attemptRun(assignment);
     } catch (e) {
       // Anything but a failed Run (a bug, a missing token file) or a bad token is not for a retry to fix.
       if (!(e instanceof RunFailure) || e.kind === "auth") throw e;
@@ -105,25 +111,17 @@ function resetOf(failure: RunFailure, now: Date): Date {
 }
 
 /** One Run, recorded in its `runs` row whether it succeeds or not. */
-async function attemptRun(
-  opts: AgentExecutorOptions,
-  task: TaskRow,
-  stage: StageConfig,
-  agentName: string,
-  history: History,
-): Promise<Verdict> {
+async function attemptRun({ opts, task, stage, agentName, history }: Assignment): Promise<Verdict> {
   const milestone = opts.store.getMilestone(task.milestone_id);
   const request = milestone && opts.store.getRequest(milestone.request_id);
   if (!request) throw new Error(`no Request for task ${task.id}`);
-  const runId = opts.store.createRun({
+  const recording = openRun(opts, {
     task_id: task.id,
     request_id: request.id,
     stage: stage.name,
     agent: agentName,
   });
-  const started = Date.now();
-  // What the row shows if the Run fails after spending something.
-  let spent: Partial<RunRow> = {};
+  const runId = recording.runId;
   try {
     const loaded = opts.config.agents.get(agentName);
     if (!loaded) throw new Error(`stage "${stage.name}": unknown agent "${agentName}"`);
@@ -151,63 +149,20 @@ async function attemptRun(
       },
       ...history,
     });
-    spent = { model: spec.model ?? null, effort: spec.effort ?? null };
+    recording.planned(spec);
     const result = await opts.runner.run(spec);
-    await keepRaw(opts.home, runId, result.raw);
-    spent = {
-      model: result.model ?? spec.model ?? null,
-      effort: spec.effort ?? null,
-      ...usageColumns(result.usage),
-    };
+    await recording.returned(spec, result);
     if (!existsSync(result.reportPath)) {
-      throw new RunFailure("missing-report", `${agentName} left no report at ${result.reportPath}`);
+      throw new RunFailure(
+        "missing-report",
+        `${agentName} left no report at ${result.reportPath}`,
+        { exitCode: 0 },
+      );
     }
-    opts.store.finishRun(runId, {
-      ...spent,
-      verdict: result.verdict,
-      duration_ms: Date.now() - started,
-      exit_code: 0,
-      report_path: result.reportPath,
-    });
+    recording.finish(result);
     return result.verdict;
   } catch (e) {
-    if (e instanceof RunFailure) {
-      if (e.stdout) await keepRaw(opts.home, runId, e.stdout);
-      if (e.usage) spent = { ...spent, ...usageColumns(e.usage) };
-    }
-    opts.store.finishRun(runId, {
-      ...spent,
-      duration_ms: Date.now() - started,
-      error: e instanceof Error ? e.message : String(e),
-    });
+    await recording.fail(e);
     throw e;
-  }
-}
-
-/** The `runs` columns a Run's usage fills in. */
-function usageColumns(usage: Usage): Partial<RunRow> {
-  return {
-    tokens_in: usage.input_tokens,
-    tokens_out: usage.output_tokens,
-    cache_read: usage.cache_read_input_tokens,
-    cache_write: usage.cache_creation_input_tokens,
-    context_peak: usage.context_peak,
-    cost_usd: usage.cost_usd,
-  };
-}
-
-/**
- * Saves what a Run printed to `$FOREMAN_HOME/runs/<id>.json`. It is for diagnosis, so a failure to
- * write it is logged and never hides the Run's own outcome.
- */
-async function keepRaw(home: string, runId: number, raw: string): Promise<void> {
-  try {
-    const dir = join(home, "runs");
-    await mkdir(dir, { recursive: true });
-    await writeFile(join(dir, `${runId}.json`), raw);
-  } catch (e) {
-    console.error(
-      `could not keep the output of Run ${runId}: ${e instanceof Error ? e.message : e}`,
-    );
   }
 }

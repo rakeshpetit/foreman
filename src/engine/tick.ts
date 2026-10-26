@@ -34,8 +34,12 @@ export type TickResult =
    * untouched and `stage` is the Stage it was at, if any.
    */
   | { kind: "error"; task: string; stage?: Stage; message: string }
-  /** The subscription's usage limit was hit. The queue is paused until `until` (ISO); the Task is back to `queued`, with no Round. */
-  | { kind: "usage-limit"; task: string; stage: Stage; until: string }
+  /**
+   * The subscription's usage limit was hit. The Task is back to `queued`, with no Round. The queue is
+   * paused until `until` (ISO), the reset, unless the Owner's own pause was on: then `ownerPause` is
+   * true, that pause was kept (it has no end time) and `until` is only when the limit resets.
+   */
+  | { kind: "usage-limit"; task: string; stage: Stage; until: string; ownerPause: boolean }
   /** The executor asked for the Owner. The Task is parked and the engine can go on to the next. */
   | { kind: "escalated"; task: string; stage: Stage; message: string };
 
@@ -109,41 +113,38 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
       const message = e instanceof Error ? e.message : String(e);
       if (e instanceof UsageLimit) {
         const until = e.resetsAt.toISOString();
-        store.transaction(() => {
-          store.updateTask(task.id, { status: "queued", stage });
-          // The Owner's own pause, set while the Run was in flight, outlasts the limit.
-          const q = store.queueState();
-          if (!(q.paused && q.paused_until === null)) {
-            store.setQueueState({
-              paused: true,
-              paused_until: until,
-              reason: `usage limit reached, resumes ${until}`,
-            });
-          }
-          store.addEvent("queue.paused", task.id, { stage, until, message });
-        });
-        return { kind: "usage-limit", task: task.id, stage, until };
+        const ownerPause = store.isPausedByOwner();
+        putBack(
+          store,
+          task,
+          stage,
+          "queued",
+          "queue.paused",
+          { until, ownerPause, message },
+          () => {
+            // The Owner's own pause, set while the Run was in flight, outlasts the limit.
+            if (!ownerPause) {
+              store.setQueueState({
+                paused: true,
+                paused_until: until,
+                reason: `usage limit reached, resumes ${until}`,
+              });
+            }
+          },
+        );
+        return { kind: "usage-limit", task: task.id, stage, until, ownerPause };
       }
       if (e instanceof Escalation) {
-        store.transaction(() => {
-          store.updateTask(task.id, { status: "parked", stage });
-          store.addEvent("task.escalated", task.id, { stage, message });
-        });
+        putBack(store, task, stage, "parked", "task.escalated", { message });
         return { kind: "escalated", task: task.id, stage, message };
       }
-      store.transaction(() => {
-        store.updateTask(task.id, { status: "queued", stage });
-        store.addEvent("stage.crashed", task.id, { stage, message });
-      });
+      putBack(store, task, stage, "queued", "stage.crashed", { message });
       return { kind: "error", task: task.id, stage, message };
     }
     if (!isRouted(verdict)) {
       // BLOCKED and SCOPE_CHANGE have no route until M5-T06 and M5-T08. Treat them as a crash.
       const message = `stage "${stage}" ended with ${verdict}, which the engine cannot route yet`;
-      store.transaction(() => {
-        store.updateTask(task.id, { status: "queued", stage });
-        store.addEvent("verdict.unhandled", task.id, { stage, verdict, message });
-      });
+      putBack(store, task, stage, "queued", "verdict.unhandled", { verdict, message });
       return { kind: "error", task: task.id, stage, message };
     }
     const transition = route(pipeline, stage, verdict, task);
@@ -153,6 +154,26 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
     store.releaseLease(task.id);
     store.addEvent("lease.released", task.id, { holder });
   }
+}
+
+/**
+ * A Stage did not finish: puts the Task back with `status` at the same Stage and writes `event`,
+ * in one transaction with whatever else `also` writes.
+ */
+function putBack(
+  store: Store,
+  task: TaskRow,
+  stage: Stage,
+  status: "queued" | "parked",
+  event: string,
+  data: Record<string, unknown>,
+  also?: () => void,
+): void {
+  store.transaction(() => {
+    store.updateTask(task.id, { status, stage });
+    also?.();
+    store.addEvent(event, task.id, { stage, ...data });
+  });
 }
 
 function apply(

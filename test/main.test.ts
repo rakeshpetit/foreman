@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { main, version } from "../src/cli/main.ts";
+import type { Docker } from "../src/docker/docker.ts";
 import { Store } from "../src/store/store.ts";
-import { FakeDocker } from "./fakes/docker/docker.ts";
+import { claudeResult, FakeDocker, flagValues } from "./fakes/docker/docker.ts";
 import { removeTmpDirs, tmpDir } from "./helpers.ts";
 
 afterEach(removeTmpDirs);
@@ -13,7 +14,7 @@ test("version reads package.json", () => {
   assert.match(version(), /^\d+\.\d+\.\d+$/);
 });
 
-function cli(foremanDir?: string) {
+function cli(foremanDir?: string, docker?: Docker) {
   const root = tmpDir("foreman-cli-");
   const home = join(root, "home");
   const plan = join(root, "plan");
@@ -43,6 +44,7 @@ function cli(foremanDir?: string) {
       out: (l) => out.push(l),
       err: (l) => err.push(l),
       foremanDir,
+      docker,
     });
   return { root, home, plan, fake, out, err, run };
 }
@@ -186,21 +188,93 @@ test("resume clears a timed pause as well as an owner pause", async () => {
   assert.match(out.at(-1) ?? "", /Queue:\*\* running/);
 });
 
-test("run without --fake has no Runner: exits non-zero and leaves every Task queued", async () => {
-  const { run, plan, root, home, err } = cli();
-  await run("import", root, plan);
-  await run("go", "R-1");
-  assert.equal(await run("run", "--until-idle"), 1);
-  assert.match(err.at(-1) ?? "", /No Runner yet: pass --fake <script.json>/);
-
+/** Everything `run` could change in the Store. */
+function snapshot(home: string) {
   const store = Store.open(home);
   try {
-    const tasks = store.listTasks();
-    assert.equal(tasks.length, 2);
-    assert.ok(tasks.every((t) => t.status === "queued"));
+    return {
+      tasks: store.listTasks(),
+      runs: store.listRuns(),
+      events: store.listEvents(),
+      queue: store.queueState(),
+    };
   } finally {
     store.close();
   }
+}
+
+test("run without --fake and without claude.env refuses, naming the file and `claude setup-token`", async () => {
+  const docker = new FakeDocker();
+  const { run, plan, root, home, err } = cli(undefined, docker);
+  await run("import", root, plan);
+  await run("go", "R-1");
+  const before = snapshot(home);
+  assert.equal(await run("run", "--until-idle"), 1);
+  assert.match(err.at(-1) ?? "", new RegExp(`${join(home, "claude.env")}.*claude setup-token`));
+  assert.deepEqual(snapshot(home), before);
+  assert.ok(before.tasks.every((t) => t.status === "queued"));
+  assert.equal(docker.callsStarting("run").length, 0);
+});
+
+test("run without --fake refuses when the Docker daemon is not running", async () => {
+  const docker = new FakeDocker();
+  docker.daemonDown = true;
+  const { run, plan, root, home, err } = cli(undefined, docker);
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "claude.env"), "CLAUDE_CODE_OAUTH_TOKEN=sk-test\n");
+  await run("import", root, plan);
+  await run("go", "R-1");
+  const before = snapshot(home);
+  assert.equal(await run("run", "--until-idle"), 1);
+  assert.match(err.at(-1) ?? "", /Docker daemon is not running/);
+  assert.deepEqual(snapshot(home), before);
+  assert.equal(docker.callsStarting("run").length, 0);
+});
+
+test("run without --fake refuses when docker is not installed", async () => {
+  const missing: Docker = {
+    run: () => Promise.reject(Object.assign(new Error("spawn docker ENOENT"), { code: "ENOENT" })),
+  };
+  const { run, plan, root, home, err } = cli(undefined, missing);
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "claude.env"), "CLAUDE_CODE_OAUTH_TOKEN=sk-test\n");
+  await run("import", root, plan);
+  await run("go", "R-1");
+  const before = snapshot(home);
+  assert.equal(await run("run", "--until-idle"), 1);
+  assert.match(err.at(-1) ?? "", /docker is not installed/);
+  assert.deepEqual(snapshot(home), before);
+});
+
+test("run without --fake builds a ContainerRunner and takes a Task through an agent Stage", async () => {
+  const docker = new FakeDocker();
+  docker.claude = (args) => {
+    // The Agent leaves its report where its prompt says, under the worktree it has mounted.
+    const workdir = flagValues(args, "--volume")
+      .find((v) => v.endsWith(":/work"))
+      ?.slice(0, -":/work".length);
+    const report = args.join("\n").match(/\/work\/(\.foreman\/R-1\/runs\/\d+-\w+\.md)/)?.[1];
+    assert.ok(workdir && report);
+    mkdirSync(dirname(join(workdir, report)), { recursive: true });
+    writeFileSync(join(workdir, report), "# report");
+    return { code: 0, stdout: claudeResult(), stderr: "" };
+  };
+  const { run, plan, root, home, out } = cli(undefined, docker);
+  mkdirSync(home, { recursive: true });
+  writeFileSync(join(home, "claude.env"), "CLAUDE_CODE_OAUTH_TOKEN=sk-test\n");
+  await run("import", root, plan);
+  await run("go", "R-1");
+  assert.equal(await run("run"), 0);
+  assert.equal(out.at(-1), "Ran 1 stage");
+
+  assert.equal(docker.callsStarting("run", "--rm").length, 1);
+  const { runs, tasks } = snapshot(home);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]?.stage, "workup");
+  assert.equal(runs[0]?.verdict, "PASS");
+  assert.equal(runs[0]?.exit_code, 0);
+  assert.equal(tasks[0]?.status, "active");
+  assert.notEqual(tasks[0]?.stage, "workup");
 });
 
 test("run --fake <script> plays the script through FakeRunner", async () => {
