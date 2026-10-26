@@ -2,10 +2,12 @@ export interface ParsedTask {
   ref: string;
   title: string;
   kind: string;
-  size: string;
+  size_est: string;
   depends: string[];
   dependsLine: number;
   line: number;
+  do: string;
+  doneWhen: string;
   body: string;
 }
 export interface ParsedMilestone {
@@ -30,11 +32,16 @@ const TASK = /^### (M\d+-T\d+) · (.+?)\s*$/;
 const KIND = /^- \*\*Kind:\*\* (\S+)/;
 const SIZE = /\*\*Size:\*\* (\S+)/;
 const DEPENDS = /\*\*Depends:\*\* (.+?)\s*$/;
+const DO = /^- \*\*Do(?: \([^)]*\))?:\*\*\s*(.*)$/;
+const DONE_WHEN = /^- \*\*Done when:\*\*\s*(.*)$/;
+const FIELD = /^- \*\*|^---\s*$/;
 
 export function parseTasks(text: string): ParsedPlan {
   const lines = text.split("\n");
   const milestones: ParsedMilestone[] = [];
   const refs = new Map<string, number>();
+  const keys = new Map<string, number>();
+  let field: "do" | "doneWhen" | undefined;
   let ms: ParsedMilestone | undefined;
   let task: ParsedTask | undefined;
   let buf: string[] = [];
@@ -42,6 +49,7 @@ export function parseTasks(text: string): ParsedPlan {
   const closeTask = () => {
     if (task) task.body = `${buf.join("\n").trim()}\n`;
     task = undefined;
+    field = undefined;
     buf = [];
   };
 
@@ -50,8 +58,14 @@ export function parseTasks(text: string): ParsedPlan {
     const m = MILESTONE.exec(raw);
     if (m) {
       closeTask();
+      const key = m[1] as string;
+      const prevMs = keys.get(key);
+      if (prevMs !== undefined) {
+        throw new ImportError(`duplicate milestone ID ${key} (first defined on line ${prevMs})`, n);
+      }
+      keys.set(key, n);
       ms = {
-        key: m[1] as string,
+        key,
         title: (m[2] as string).replace(/\s*·.*$/, "").trim(),
         tasks: [],
       };
@@ -75,10 +89,12 @@ export function parseTasks(text: string): ParsedPlan {
         ref,
         title: t[2] as string,
         kind: "",
-        size: "",
+        size_est: "",
         depends: [],
         dependsLine: n,
         line: n,
+        do: "",
+        doneWhen: "",
         body: "",
       };
       ms.tasks.push(task);
@@ -87,10 +103,19 @@ export function parseTasks(text: string): ParsedPlan {
     }
     if (task) {
       buf.push(raw);
+      const section = DO.exec(raw) ?? DONE_WHEN.exec(raw);
+      if (section) {
+        field = DO.test(raw) ? "do" : "doneWhen";
+        task[field] = section[1] as string;
+      } else if (FIELD.test(raw)) {
+        field = undefined;
+      } else if (field) {
+        task[field] += `\n${raw}`;
+      }
       const k = KIND.exec(raw);
       if (k) {
         task.kind = k[1] as string;
-        task.size = SIZE.exec(raw)?.[1] ?? "";
+        task.size_est = SIZE.exec(raw)?.[1] ?? "";
         const d = DEPENDS.exec(raw)?.[1];
         task.dependsLine = n;
         if (d && d.toLowerCase() !== "none") {
@@ -107,6 +132,8 @@ export function parseTasks(text: string): ParsedPlan {
   for (const m of milestones) {
     for (const t of m.tasks) {
       if (!t.kind) throw new ImportError(`task ${t.ref} has no Kind/Size/Depends line`, t.line);
+      if (!t.do.trim()) throw new ImportError(`task ${t.ref} has no Do`, t.line);
+      if (!t.doneWhen.trim()) throw new ImportError(`task ${t.ref} has no Done when`, t.line);
       for (const d of t.depends) {
         if (!refs.has(d))
           throw new ImportError(`task ${t.ref} depends on unknown task ${d}`, t.dependsLine);

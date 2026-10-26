@@ -1,6 +1,10 @@
 export type Priority = "min" | "low" | "default" | "high" | "max";
 
+/** `main` is the Owner's topic; `usage` carries Task summaries at low priority (ADR 0009). */
+export type Channel = "main" | "usage";
+
 export interface Notification {
+  channel?: Channel;
   title: string;
   message: string;
   priority?: Priority;
@@ -14,6 +18,8 @@ export interface Notifier {
 export const taskDone = (task: string, title: string): Notification => ({
   title: `Task done: ${task}`,
   message: title,
+  channel: "usage",
+  priority: "low",
   tags: ["white_check_mark"],
 });
 

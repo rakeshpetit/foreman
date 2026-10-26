@@ -2,18 +2,93 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { PIPELINE, type Stage, VERDICTS, type Verdict } from "../engine/route.ts";
 import { MIGRATIONS } from "./schema.ts";
 
 export type Mode = "manual" | "auto";
 export type RequestPhase = "planning" | "building" | "done";
 export type TaskStatus = "queued" | "active" | "awaiting_owner" | "parked" | "done" | "dropped";
+export type Origin = "planned" | "research" | "owner";
+export type Lane = "normal" | "fast";
+export type ApprovalKind = "go" | "task" | "milestone" | "amendment" | "consent";
+export type Channel = "cli" | "telegram";
+
+const ORIGINS: readonly Origin[] = ["planned", "research", "owner"];
+const LANES: readonly Lane[] = ["normal", "fast"];
+const APPROVAL_KINDS: readonly ApprovalKind[] = ["go", "task", "milestone", "amendment", "consent"];
+const CHANNELS: readonly Channel[] = ["cli", "telegram"];
+const TASK_STATUSES: readonly TaskStatus[] = [
+  "queued",
+  "active",
+  "awaiting_owner",
+  "parked",
+  "done",
+  "dropped",
+];
+const APPROVAL_STATUSES: readonly ApprovalRow["status"][] = ["pending", "approved", "rejected"];
+
+type Row = Record<string, unknown>;
+
+/** Narrows a stored value to one of `allowed`, or throws naming the table, row and column. */
+function oneOf<T extends string>(
+  allowed: readonly T[],
+  value: unknown,
+  where: string,
+  column: string,
+): T {
+  if (allowed.includes(value as T)) return value as T;
+  throw new Error(`${where}: unknown ${column} ${JSON.stringify(value)}`);
+}
+
+function orNull<T extends string>(
+  allowed: readonly T[],
+  value: unknown,
+  where: string,
+  column: string,
+): T | null {
+  return value === null ? null : oneOf(allowed, value, where, column);
+}
+
+function taskRow(row: Row): TaskRow {
+  const where = `tasks ${String(row.id)}`;
+  return {
+    ...(row as unknown as TaskRow),
+    origin: oneOf(ORIGINS, row.origin, where, "origin"),
+    lane: oneOf(LANES, row.lane, where, "lane"),
+    stage: orNull(PIPELINE, row.stage, where, "stage"),
+    status: oneOf(TASK_STATUSES, row.status, where, "status"),
+  };
+}
+
+function runRow(row: Row): RunRow {
+  const where = `runs ${String(row.id)}`;
+  return {
+    ...(row as unknown as RunRow),
+    stage: oneOf(PIPELINE, row.stage, where, "stage"),
+    verdict: orNull(VERDICTS, row.verdict, where, "verdict"),
+  };
+}
+
+function approvalRow(row: Row): ApprovalRow {
+  const where = `approvals ${String(row.id)}`;
+  return {
+    ...(row as unknown as ApprovalRow),
+    kind: oneOf(APPROVAL_KINDS, row.kind, where, "kind"),
+    status: oneOf(APPROVAL_STATUSES, row.status, where, "status"),
+    channel: orNull(CHANNELS, row.channel, where, "channel"),
+  };
+}
+
+/** A Task needs no more work: its dependants may proceed and its Request may complete. */
+export function isSettled(status: TaskStatus): boolean {
+  return status === "done" || status === "dropped";
+}
 
 export interface RequestRow {
   id: string;
   title: string;
   target_repo: string;
   mode: Mode;
-  status: string;
   phase: RequestPhase;
   token_budget: number | null;
   created_at: string;
@@ -34,11 +109,11 @@ export interface TaskRow {
   ref: string | null;
   title: string;
   kind: string;
-  origin: string;
+  origin: Origin;
   parent_task_id: string | null;
   size_est: string | null;
-  lane: string;
-  stage: string | null;
+  lane: Lane;
+  stage: Stage | null;
   stage_state: string | null;
   round_stage: number;
   round_total: number;
@@ -51,13 +126,13 @@ export interface RunRow {
   id: number;
   task_id: string;
   request_id: string;
-  stage: string;
+  stage: Stage;
   agent: string | null;
   model: string | null;
   effort: string | null;
   started_at: string;
   ended_at: string | null;
-  verdict: string | null;
+  verdict: Verdict | null;
   tokens_in: number | null;
   tokens_out: number | null;
   cache_read: number | null;
@@ -71,11 +146,11 @@ export interface RunRow {
 }
 export interface ApprovalRow {
   id: string;
-  kind: string;
+  kind: ApprovalKind;
   subject_id: string;
   status: "pending" | "approved" | "rejected";
   notes: string | null;
-  channel: string | null;
+  channel: Channel | null;
   requested_at: string;
   decided_at: string | null;
 }
@@ -86,7 +161,9 @@ export interface EventRow {
   subject: string | null;
   payload: string | null;
 }
+/** `paused` with a null `paused_until` means paused until the Owner resumes. */
 export interface QueueState {
+  paused: boolean;
   paused_until: string | null;
   reason: string | null;
 }
@@ -99,7 +176,7 @@ const PREFIX = { request: "R", milestone: "M", task: "T", approval: "A" } as con
 type IdKind = keyof typeof PREFIX;
 
 export class Store {
-  readonly db: DatabaseSync;
+  private readonly db: DatabaseSync;
   now: () => Date = () => new Date();
 
   constructor(path: string) {
@@ -191,7 +268,7 @@ export class Store {
   }
   updateRequest(
     id: string,
-    patch: Partial<Pick<RequestRow, "mode" | "status" | "phase" | "token_budget">>,
+    patch: Partial<Pick<RequestRow, "mode" | "phase" | "token_budget">>,
   ): void {
     this.patch("requests", id, patch);
   }
@@ -217,11 +294,7 @@ export class Store {
       | undefined;
   }
   listMilestones(requestId?: string): MilestoneRow[] {
-    const sql = requestId
-      ? "SELECT * FROM milestones WHERE request_id = ? ORDER BY seq"
-      : "SELECT * FROM milestones ORDER BY rowid";
-    const stmt = this.db.prepare(sql);
-    return (requestId ? stmt.all(requestId) : stmt.all()) as unknown as MilestoneRow[];
+    return this.list("milestones", "request_id", requestId, "seq") as unknown as MilestoneRow[];
   }
   updateMilestone(id: string, patch: Partial<Pick<MilestoneRow, "status" | "branch">>): void {
     this.patch("milestones", id, patch);
@@ -234,12 +307,12 @@ export class Store {
     title: string;
     ref?: string;
     kind?: string;
-    origin?: string;
+    origin?: Origin;
     parent_task_id?: string;
     size_est?: string;
-    lane?: string;
-    file_path?: string;
-    stage?: string;
+    lane?: Lane;
+    file_path?: string | ((id: string) => string);
+    stage?: Stage;
   }): TaskRow {
     const id = this.nextId("task");
     this.db
@@ -258,20 +331,17 @@ export class Store {
         input.parent_task_id ?? null,
         input.size_est ?? null,
         input.lane ?? "normal",
-        input.file_path ?? null,
+        typeof input.file_path === "function" ? input.file_path(id) : (input.file_path ?? null),
         input.stage ?? null,
       );
     return this.getTask(id) as TaskRow;
   }
   getTask(id: string): TaskRow | undefined {
-    return this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as TaskRow | undefined;
+    const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+    return row && taskRow(row);
   }
   listTasks(milestoneId?: string): TaskRow[] {
-    const sql = milestoneId
-      ? "SELECT * FROM tasks WHERE milestone_id = ? ORDER BY seq"
-      : "SELECT * FROM tasks ORDER BY rowid";
-    const stmt = this.db.prepare(sql);
-    return (milestoneId ? stmt.all(milestoneId) : stmt.all()) as unknown as TaskRow[];
+    return this.list("tasks", "milestone_id", milestoneId, "seq").map(taskRow);
   }
   updateTask(
     id: string,
@@ -306,7 +376,7 @@ export class Store {
   }
 
   // runs
-  createRun(input: { task_id: string; request_id: string; stage: string; agent?: string }): number {
+  createRun(input: { task_id: string; request_id: string; stage: Stage; agent?: string }): number {
     const r = this.db
       .prepare(
         "INSERT INTO runs (task_id, request_id, stage, agent, started_at) VALUES (?,?,?,?,?)",
@@ -321,19 +391,19 @@ export class Store {
     this.patch("runs", id, { ended_at: this.iso(), ...patch });
   }
   getRun(id: number): RunRow | undefined {
-    return this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id) as RunRow | undefined;
+    const row = this.db.prepare("SELECT * FROM runs WHERE id = ?").get(id);
+    return row && runRow(row);
   }
   listRuns(taskId?: string): RunRow[] {
-    const stmt = this.db.prepare(
-      taskId
-        ? "SELECT * FROM runs WHERE task_id = ? ORDER BY id"
-        : "SELECT * FROM runs ORDER BY id",
-    );
-    return (taskId ? stmt.all(taskId) : stmt.all()) as unknown as RunRow[];
+    return this.list("runs", "task_id", taskId, "id", "id").map(runRow);
   }
 
   // approvals
-  createApproval(input: { kind: string; subject_id: string; channel?: string }): ApprovalRow {
+  createApproval(input: {
+    kind: ApprovalKind;
+    subject_id: string;
+    channel?: Channel;
+  }): ApprovalRow {
     const id = this.nextId("approval");
     this.db
       .prepare(
@@ -343,23 +413,17 @@ export class Store {
     return this.getApproval(id) as ApprovalRow;
   }
   getApproval(id: string): ApprovalRow | undefined {
-    return this.db.prepare("SELECT * FROM approvals WHERE id = ?").get(id) as
-      | ApprovalRow
-      | undefined;
+    const row = this.db.prepare("SELECT * FROM approvals WHERE id = ?").get(id);
+    return row && approvalRow(row);
   }
   listApprovals(status?: ApprovalRow["status"]): ApprovalRow[] {
-    const stmt = this.db.prepare(
-      status
-        ? "SELECT * FROM approvals WHERE status = ? ORDER BY rowid"
-        : "SELECT * FROM approvals ORDER BY rowid",
-    );
-    return (status ? stmt.all(status) : stmt.all()) as unknown as ApprovalRow[];
+    return this.list("approvals", "status", status).map(approvalRow);
   }
   decideApproval(
     id: string,
     status: "approved" | "rejected",
     notes?: string,
-    channel?: string,
+    channel?: Channel,
   ): void {
     this.db
       .prepare(
@@ -393,14 +457,20 @@ export class Store {
 
   // queue state
   queueState(): QueueState {
-    return this.db
-      .prepare("SELECT paused_until, reason FROM queue_state WHERE id = 1")
-      .get() as unknown as QueueState;
+    const row = this.db
+      .prepare("SELECT paused, paused_until, reason FROM queue_state WHERE id = 1")
+      .get() as { paused: number; paused_until: string | null; reason: string | null };
+    return { ...row, paused: row.paused === 1 };
   }
   setQueueState(state: QueueState): void {
     this.db
-      .prepare("UPDATE queue_state SET paused_until = ?, reason = ? WHERE id = 1")
-      .run(state.paused_until, state.reason);
+      .prepare("UPDATE queue_state SET paused = ?, paused_until = ?, reason = ? WHERE id = 1")
+      .run(state.paused ? 1 : 0, state.paused_until, state.reason);
+  }
+  /** True while paused until resumed, or while a timed pause has not yet reached its time. */
+  isPaused(): boolean {
+    const q = this.queueState();
+    return q.paused && (q.paused_until === null || new Date(q.paused_until) > this.now());
   }
 
   // events
@@ -414,9 +484,30 @@ export class Store {
         payload === undefined ? null : JSON.stringify(payload),
       );
   }
+  /** Oldest first. With `limit`, only the newest `limit` events are read. */
   listEvents(limit?: number): EventRow[] {
-    const rows = this.db.prepare("SELECT * FROM events ORDER BY id").all() as unknown as EventRow[];
-    return limit ? rows.slice(-limit) : rows;
+    if (!limit) {
+      return this.db.prepare("SELECT * FROM events ORDER BY id").all() as unknown as EventRow[];
+    }
+    const rows = this.db
+      .prepare("SELECT * FROM events ORDER BY id DESC LIMIT ?")
+      .all(limit) as unknown as EventRow[];
+    return rows.reverse();
+  }
+
+  /** All rows of `table`, or only those whose `column` equals `value` when one is given. */
+  private list(
+    table: string,
+    column: string,
+    value: string | undefined,
+    filteredOrder = "rowid",
+    allOrder = "rowid",
+  ): Row[] {
+    if (value === undefined)
+      return this.db.prepare(`SELECT * FROM ${table} ORDER BY ${allOrder}`).all();
+    return this.db
+      .prepare(`SELECT * FROM ${table} WHERE ${column} = ? ORDER BY ${filteredOrder}`)
+      .all(value);
   }
 
   private patch(table: string, id: string | number, patch: Record<string, unknown>): void {

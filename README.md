@@ -8,9 +8,10 @@ Stages, with Gates and Owner Approvals. Design: [CONTEXT.md](CONTEXT.md),
 
 ```sh
 asdf install            # Node from .tool-versions
-npm install
-git config core.hooksPath .githooks   # pre-push runs the check
+npm install             # also points git at .githooks, so pre-push runs the check
 npm run check           # Biome + tsc --noEmit + node --test
+npm run typecheck       # tsc --noEmit alone
+npm test                # node --test alone
 node src/cli/main.ts --version
 ```
 

@@ -43,7 +43,7 @@ tg  ─┼─▶ commands ──▶ engine ──▶ stage executors ──┬�
 |---|---|---|
 | `store` | SQLite schema, migrations, every query | Typed repositories: `requests`, `tasks`, `runs`, `approvals`, `events`… Nothing else touches SQL |
 | `config` | Loading and merging the three layers, validating `pipeline.toml`, parsing AGENT.md, resolving skills | `loadConfig(targetRepo, requestOverrides) → ResolvedConfig`, `agentsFor(task, stage)` |
-| `engine` | The state machine: picking the next actionable Task, leases, routing pass/fail, Rounds, Breaker, Milestone completion | `tick() → TickResult`, pure routing in `route(stage, outcome, task) → Transition` |
+| `engine` | The state machine: picking the next actionable Task, leases, routing pass/fail, Rounds, Breaker, Milestone completion | `tick() → TickResult`, pure routing in `route(stage, verdict, task) → Transition` |
 | `runner` | Running one Agent Run: assembling the prompt, launching the container, collecting the result | `Runner.run(RunSpec) → RunResult` (impls: `FakeRunner`, `ContainerRunner`) |
 | `gates` | Each Gate as a small function over the worktree and the database | `Gate.check(ctx) → {passed, detail}`, registered by name |
 | `git` | Worktrees, branches, commits, `--no-ff` merges, push, diff stats, red-before checkouts | `Git` (impls: real git; tests use temp repos with a bare remote) |
@@ -69,26 +69,29 @@ Every step is idempotent, so a crash mid-Run is recovered by the Sweeper.
 
 ## Data model (SQLite)
 
+Tables marked *(later)* are not in `src/store/schema.ts` yet. Their Milestone adds them as a new migration. Every other table matches `schema.ts` column for column. `schema.ts` is the source of truth, so change it first and this list after.
+
 ```
-requests     (id 'R-n', title, target_repo, mode manual|auto, status, phase planning|building|done,
+counters     (kind, n)   -- the last number issued per ID kind (request, milestone, task, approval); the `n` in `R-n`, `M-n`, `T-n`, `A-n`
+requests     (id 'R-n', title, target_repo, mode manual|auto, phase planning|building|done,
               token_budget, created_at)
 milestones   (id 'M-n', request_id, seq, title, branch, status, created_at)
-tasks        (id 'T-n', milestone_id, seq, title, kind, origin planned|research|owner,
+tasks        (id 'T-n', milestone_id, seq, ref, title, kind, origin planned|research|owner,
               parent_task_id, size_est, lane normal|fast, stage, stage_state, round_stage,
               round_total, status queued|active|awaiting_owner|parked|done|dropped,
-              agent_overrides json, branch, file_path)
+              agent_overrides json, branch, file_path)   -- ref = the plan file's own ID (e.g. `M1-T03`)
 task_deps    (task_id, depends_on)
 runs         (id, task_id, request_id, stage, agent, model, effort, started_at, ended_at,
               verdict, tokens_in, tokens_out, cache_read, cache_write, context_peak,
               cost_usd, duration_ms, exit_code, report_path, error)
-gate_results (id, task_id, stage, gate, passed, detail, at)
+gate_results (id, task_id, stage, gate, passed, detail, at)   -- (later)
 approvals    (id 'A-n', kind go|task|milestone|amendment|consent, subject_id, status
               pending|approved|rejected, notes, channel cli|telegram, requested_at, decided_at)
-escalations  (id 'E-n', task_id, handoff_path, status open|answered, answer, precedent bool)
-proposals    (id 'P-n', request_id, from_task_id, title, body_path, status open|admitted|dropped)
-consents     (repo_path, granted bool, decided_at)
+escalations  (id 'E-n', task_id, handoff_path, status open|answered, answer, precedent bool)   -- (later)
+proposals    (id 'P-n', request_id, from_task_id, title, body_path, status open|admitted|dropped)   -- (later)
+consents     (repo_path, granted bool, decided_at)   -- (later)
 leases       (task_id, holder, expires_at)
-queue_state  (paused_until, reason)
+queue_state  (paused, paused_until, reason)   -- paused with null paused_until = until resumed
 events       (id, at, type, subject, payload json)   -- append-only, used for retrospectives
 ```
 
@@ -132,6 +135,7 @@ docs/{adr,plan}/  CONTEXT.md  README.md
 ## Testing strategy
 
 - **Unit:** `engine.route` (pure), config merging and validation, AGENT.md parsing, each Gate against fixture repos, `status.render` snapshots.
+- **Store in tests:** `Store.memory()` opens a private in-memory SQLite database with every migration applied, so engine and command tests need no temp directory. Tests that go through the CLI use a temporary `FOREMAN_HOME` instead.
 - **Integration:**
   - The fake `claude` is a script that reads `FAKE_CLAUDE_SCRIPT` (stage → files to write, verdict, usage, optional exit or usage-limit error). The fake Docker passes calls through to it on the host.
   - Temporary git repos use a bare "remote".

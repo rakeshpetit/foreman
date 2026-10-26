@@ -42,4 +42,8 @@ export const MIGRATIONS: string[] = [
     subject TEXT, payload TEXT
   );
   `,
+  // A pause is explicit: `paused` with `paused_until` NULL lasts until resumed.
+  "ALTER TABLE queue_state ADD COLUMN paused INTEGER NOT NULL DEFAULT 0;",
+  // `requests.status` sat next to `phase` and was never used.
+  "ALTER TABLE requests DROP COLUMN status;",
 ];

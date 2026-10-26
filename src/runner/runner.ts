@@ -1,4 +1,4 @@
-import type { Outcome, Stage } from "../engine/route.ts";
+import type { Stage, Verdict } from "../engine/route.ts";
 
 export interface Usage {
   input_tokens: number;
@@ -14,7 +14,7 @@ export interface RunSpec {
 }
 
 export interface RunResult {
-  verdict: Outcome;
+  verdict: Verdict;
   reportPath: string;
   usage: Usage;
 }

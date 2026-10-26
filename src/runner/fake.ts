@@ -1,10 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { Stage } from "../engine/route.ts";
+import { PIPELINE, type Stage, VERDICTS, type Verdict } from "../engine/route.ts";
 import type { Runner, RunResult, RunSpec, Usage } from "./runner.ts";
 
 export interface FakeStep {
-  verdict: "pass" | "fail";
+  verdict: Verdict;
   /** Files to write, keyed by path relative to the workdir. */
   files?: Record<string, string>;
   usage?: Usage;
@@ -14,6 +14,25 @@ export interface FakeStep {
 export type FakeScript = Partial<Record<Stage, FakeStep[]>>;
 
 const NO_USAGE: Usage = { input_tokens: 0, output_tokens: 0 };
+
+/** Checks a script read from JSON: known Stages only, and every step has a Verdict foreman knows. */
+export function parseFakeScript(json: unknown): FakeScript {
+  if (typeof json !== "object" || json === null || Array.isArray(json)) {
+    throw new Error("a script is an object of Stage → steps");
+  }
+  for (const [stage, steps] of Object.entries(json)) {
+    if (!(PIPELINE as readonly string[]).includes(stage)) {
+      throw new Error(`unknown stage ${JSON.stringify(stage)}`);
+    }
+    if (!Array.isArray(steps)) throw new Error(`${stage}: steps must be an array`);
+    for (const step of steps) {
+      if (!(VERDICTS as readonly unknown[]).includes(step?.verdict)) {
+        throw new Error(`${stage}: verdict must be one of ${VERDICTS.join(", ")}`);
+      }
+    }
+  }
+  return json as FakeScript;
+}
 
 export class FakeRunner implements Runner {
   readonly calls: RunSpec[] = [];
@@ -25,7 +44,7 @@ export class FakeRunner implements Runner {
 
   async run(spec: RunSpec): Promise<RunResult> {
     this.calls.push(spec);
-    const step = this.#script[spec.stage]?.shift() ?? { verdict: "pass" };
+    const step = this.#script[spec.stage]?.shift() ?? { verdict: "PASS" };
     for (const [path, content] of Object.entries(step.files ?? {})) {
       const file = join(spec.workdir, path);
       await mkdir(dirname(file), { recursive: true });

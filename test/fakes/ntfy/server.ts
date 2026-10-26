@@ -9,10 +9,11 @@ export interface RecordedCall {
   body: string;
 }
 
-/** A local HTTP server that records ntfy publishes. Set `status` to simulate failure. */
+/** A local HTTP server that records ntfy publishes. Set `status` to simulate failure, `hang` to never answer. */
 export class FakeNtfy {
   readonly calls: RecordedCall[] = [];
   status = 200;
+  hang = false;
   #server: Server = createServer((req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
@@ -25,6 +26,7 @@ export class FakeNtfy {
         tags: h.tags as string | undefined,
         body: Buffer.concat(chunks).toString("utf8"),
       });
+      if (this.hang) return;
       res.statusCode = this.status;
       res.end("{}");
     });
@@ -36,6 +38,7 @@ export class FakeNtfy {
   }
 
   async stop(): Promise<void> {
+    this.#server.closeAllConnections();
     await new Promise<void>((r) => this.#server.close(() => r()));
   }
 }

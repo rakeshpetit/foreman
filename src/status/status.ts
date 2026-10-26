@@ -7,10 +7,10 @@ export function render(store: Store): string {
   const out: string[] = ["# Foreman status", ""];
 
   const q = store.queueState();
-  const paused = q.paused_until && new Date(q.paused_until) > store.now();
+  const until = q.paused_until ? `until ${q.paused_until}` : "(until resumed)";
   out.push(
-    paused
-      ? `**Queue:** paused until ${q.paused_until}${q.reason ? ` (${q.reason})` : ""}`
+    store.isPaused()
+      ? `**Queue:** paused ${until}${q.reason ? ` (${q.reason})` : ""}`
       : "**Queue:** running",
     "",
   );
