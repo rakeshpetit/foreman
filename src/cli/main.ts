@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
+import { showConfig } from "../commands/config.ts";
 import { runEngine } from "../commands/run.ts";
+import { AgentError } from "../config/agent.ts";
+import { ConfigError } from "../config/layers.ts";
 import {
   DEFAULT_PIPELINE_PATH,
   loadPipeline,
@@ -43,6 +46,7 @@ Commands:
   go <R>                           Approve a Request and start building
   run [--until-idle] [--fake <script.json>]
                                    Run the engine (one tick, or until idle) with a FakeRunner
+  config show <R> [--task <T>]     Print a Request's resolved config and where each value came from
   status                           Print STATUS.md
   pause                            Pause the queue
   resume                           Resume the queue
@@ -54,7 +58,7 @@ Environment:
                                    $FOREMAN_HOME/config.toml. Pings need a server and topic
 `;
 
-const COMMANDS = new Set(["import", "go", "run", "status", "pause", "resume"]);
+const COMMANDS = new Set(["import", "go", "run", "config", "status", "pause", "resume"]);
 const STATE_CHANGING = new Set(["import", "go", "pause", "resume"]);
 
 export async function main(argv: string[], ctx: Context): Promise<number> {
@@ -90,7 +94,14 @@ export async function main(argv: string[], ctx: Context): Promise<number> {
     return code;
   } catch (e) {
     // Expected failures are one line (ImportError already carries "line N:"); anything else keeps its stack.
-    if (e instanceof ImportError || e instanceof PipelineError) return fail(ctx, e.message);
+    if (
+      e instanceof ImportError ||
+      e instanceof PipelineError ||
+      e instanceof ConfigError ||
+      e instanceof AgentError
+    ) {
+      return fail(ctx, e.message);
+    }
     if (e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT") {
       return fail(ctx, e.message);
     }
@@ -168,6 +179,14 @@ async function dispatch(
         return fail(ctx, `${crashed.task} crashed in ${crashed.stage}: ${crashed.message}`);
       return 0;
     }
+    case "config": {
+      const [sub, id] = rest;
+      if (sub !== "show" || !id || rest.length > 2) {
+        return fail(ctx, "Usage: foreman config show <R> [--task <T>]");
+      }
+      ctx.out(showConfig(store, id, { task: values.task }));
+      return 0;
+    }
     case "status":
       ctx.out(render(store).trimEnd());
       return 0;
@@ -206,6 +225,7 @@ function parse(argv: string[]) {
       version: { type: "boolean" },
       "until-idle": { type: "boolean" },
       fake: { type: "string" },
+      task: { type: "string" },
     },
   });
 }

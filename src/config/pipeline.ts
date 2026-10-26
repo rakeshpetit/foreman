@@ -117,6 +117,12 @@ export function parsePipeline(text: string, opts: PipelineOptions = {}): Pipelin
       source,
     );
   }
+  return validatePipeline(raw, { ...opts, source });
+}
+
+/** Validates an already-parsed `pipeline.toml` table, e.g. one merged from several config layers. */
+export function validatePipeline(raw: unknown, opts: PipelineOptions = {}): Pipeline {
+  const source = opts.source ?? "pipeline.toml";
   const shape = pipelineSchema.safeParse(raw);
   if (!shape.success) {
     throw new PipelineError(

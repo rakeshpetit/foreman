@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { type Agent, splitFrontmatter } from "./agent.ts";
 
 /** foreman's own checkout, where its `skills/` folder lives. */
-const FOREMAN_DIR = join(import.meta.dirname, "..", "..");
+export const FOREMAN_DIR = join(import.meta.dirname, "..", "..");
 
 export interface SkillRootsInput {
   targetRepo: string;

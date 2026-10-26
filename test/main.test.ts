@@ -48,7 +48,7 @@ function cli() {
 test("--help lists the commands", async () => {
   const { run, out } = cli();
   assert.equal(await run("--help"), 0);
-  for (const c of ["import", "go", "run", "status", "pause", "resume"]) {
+  for (const c of ["import", "go", "run", "config", "status", "pause", "resume"]) {
     assert.match(out.join("\n"), new RegExp(`^  ${c}\\b`, "m"));
   }
 });
@@ -305,4 +305,52 @@ test("every state-changing command rewrites STATUS.md straight away", async () =
 
   await run("resume");
   assert.match(statusFile(), /Queue:\*\* running/);
+});
+
+test("config show prints the resolved config with the source of each key", async () => {
+  const { run, plan, root, home, out, err } = cli();
+  mkdirSync(join(root, ".foreman"));
+  writeFileSync(
+    join(root, ".foreman", "config.toml"),
+    'check = "npm test"\n[breaker]\nper_task = 9\n',
+  );
+  await run("import", root, plan);
+  const store = Store.open(home);
+  try {
+    store.updateTask("T-1", { agent_overrides: JSON.stringify({ review: ["reviewer-spec"] }) });
+  } finally {
+    store.close();
+  }
+
+  out.length = 0;
+  assert.equal(await run("config", "show", "R-1"), 0);
+  const text = out.join("\n");
+  assert.match(text, /^mode\s+= "manual"\s+\(request R-1\)$/m);
+  assert.match(text, /^check\s+= "npm test"\s+\(target\)$/m);
+  assert.match(text, /^breaker\.per_task\s+= 9\s+\(target\)$/m);
+  assert.match(text, /^breaker\.per_stage\s+= 3\s+\(default\)$/m);
+  assert.doesNotMatch(text, /task\.T-1/);
+
+  out.length = 0;
+  assert.equal(await run("config", "show", "R-1", "--task", "T-1"), 0);
+  assert.match(
+    out.join("\n"),
+    /^task\.T-1\.agents\.review\s+= \["reviewer-spec"\]\s+\(request R-1\)$/m,
+  );
+
+  assert.equal(await run("config", "show", "R-9"), 1);
+  assert.match(err.at(-1) ?? "", /Unknown request: R-9/);
+  assert.equal(await run("config", "show", "R-1", "--task", "T-99"), 1);
+  assert.match(err.at(-1) ?? "", /T-99 is not a task of R-1/);
+  assert.equal(await run("config"), 1);
+  assert.match(err.at(-1) ?? "", /Usage: foreman config show/);
+});
+
+test("config show names the file of a broken Target repo config", async () => {
+  const { run, plan, root, err } = cli();
+  mkdirSync(join(root, ".foreman"));
+  writeFileSync(join(root, ".foreman", "config.toml"), "breaker = [");
+  await run("import", root, plan);
+  assert.equal(await run("config", "show", "R-1"), 1);
+  assert.match(err.at(-1) ?? "", /\.foreman\/config\.toml: not valid TOML/);
 });
