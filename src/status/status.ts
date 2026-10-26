@@ -49,6 +49,7 @@ export function render(store: Store): string {
       .listApprovals("pending")
       .map((a) => `- ${a.id}: ${a.kind} approval for ${a.subject_id}`),
     ...tasks.filter((t) => t.status === "awaiting_owner").map((t) => `- ${t.id}: ${t.title}`),
+    ...tasks.filter((t) => t.status === "parked").map((t) => `- ${t.id}: ${t.title} (parked)`),
   ];
   out.push(...(waiting.length ? waiting : ["_nothing_"]), "");
 

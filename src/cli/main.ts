@@ -177,6 +177,9 @@ async function dispatch(
       });
       const ran = results.filter((r) => r.kind === "ran").length;
       ctx.out(`Ran ${ran} stage${ran === 1 ? "" : "s"}`);
+      for (const r of results) {
+        if (r.kind === "escalated") ctx.out(`${r.task} escalated in ${r.stage}: ${r.message}`);
+      }
       const crashed = results.find((r) => r.kind === "error");
       if (crashed) {
         const where = crashed.stage ? ` in ${crashed.stage}` : "";

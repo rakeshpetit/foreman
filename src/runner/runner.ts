@@ -1,9 +1,19 @@
 import type { Stage } from "../engine/route.ts";
 import type { Verdict } from "../engine/verdict.ts";
 
+/** What a Run used. Token counts are named as Claude names them. */
 export interface Usage {
   input_tokens: number;
   output_tokens: number;
+  cache_read_input_tokens: number;
+  cache_creation_input_tokens: number;
+  /**
+   * The fullest context of the model calls the result lists, in tokens. Claude's result lists only
+   * the last call, so this is that call's context: an approximation of the peak. Null when absent.
+   */
+  context_peak: number | null;
+  /** At list price. */
+  cost_usd: number;
 }
 
 /** A JSON Schema for the structured Verdict a Run returns (`claude --json-schema`). */
@@ -46,6 +56,10 @@ export interface RunResult {
   verdict: Verdict;
   reportPath: string;
   usage: Usage;
+  /** The model that did the work, as Claude names it. Absent: the Runner could not tell. */
+  model?: string;
+  /** What the Run printed, for the caller to keep. */
+  raw: string;
 }
 
 export interface Runner {
@@ -56,19 +70,26 @@ export interface Runner {
 export type RunFailureKind =
   /** It ran past its wall-clock limit and was killed. */
   | "timeout"
-  /** The container exited non-zero, or Claude reported an error (a bad token, say). */
+  /** The container exited non-zero, or Claude reported an error. */
   | "failed"
+  /** Claude could not log in: a bad or expired token, which a retry cannot fix. */
+  | "auth"
   /** It exited cleanly but left no valid Verdict: unparseable output, a missing or disallowed Verdict. */
-  | "invalid-result";
+  | "invalid-result"
+  /** It left a Verdict but not the report its Output contract asks for. */
+  | "missing-report";
 
 export class RunFailure extends Error {
   readonly kind: RunFailureKind;
   /** Everything the container printed, for the caller to keep. */
   readonly stdout: string;
+  /** What the Run spent before it failed, when its output says. */
+  readonly usage?: Usage;
 
-  constructor(kind: RunFailureKind, message: string, stdout = "") {
+  constructor(kind: RunFailureKind, message: string, stdout = "", usage?: Usage) {
     super(message);
     this.kind = kind;
     this.stdout = stdout;
+    this.usage = usage;
   }
 }

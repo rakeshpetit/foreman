@@ -1,5 +1,6 @@
 import { DONE, type Pipeline, type StageConfig } from "../config/pipeline.ts";
 import { isSettled, type Store, type TaskRow } from "../store/store.ts";
+import { Escalation } from "./escalation.ts";
 import { enter, route, type Stage, stageOf, type Transition } from "./route.ts";
 import { isRouted, type RoutedVerdict, type Verdict } from "./verdict.ts";
 
@@ -31,7 +32,9 @@ export type TickResult =
    * Task is back to `queued` at the same Stage; or the config is broken or no longer fits the Task, so it is
    * untouched and `stage` is the Stage it was at, if any.
    */
-  | { kind: "error"; task: string; stage?: Stage; message: string };
+  | { kind: "error"; task: string; stage?: Stage; message: string }
+  /** The executor asked for the Owner. The Task is parked and the engine can go on to the next. */
+  | { kind: "escalated"; task: string; stage: Stage; message: string };
 
 export interface TickOptions {
   /** The Pipeline that runs `task`. May throw, if the Task's config is broken: that is a tick error. */
@@ -101,6 +104,13 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
       verdict = await opts.executor(task, config);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
+      if (e instanceof Escalation) {
+        store.transaction(() => {
+          store.updateTask(task.id, { status: "parked", stage });
+          store.addEvent("task.escalated", task.id, { stage, message });
+        });
+        return { kind: "escalated", task: task.id, stage, message };
+      }
       store.transaction(() => {
         store.updateTask(task.id, { status: "queued", stage });
         store.addEvent("stage.crashed", task.id, { stage, message });

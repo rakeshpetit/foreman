@@ -30,6 +30,13 @@ export const requestDone = (request: string, title: string): Notification => ({
   tags: ["tada"],
 });
 
+export const escalation = (task: string, message: string): Notification => ({
+  title: `Task escalated: ${task}`,
+  message,
+  priority: "high",
+  tags: ["sos"],
+});
+
 export const engineError = (error: unknown): Notification => ({
   title: "Foreman engine error",
   message: error instanceof Error ? error.message : String(error),

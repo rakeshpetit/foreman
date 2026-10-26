@@ -50,9 +50,35 @@ describe("ContainerRunner", () => {
     assert.deepEqual(result, {
       verdict: "PASS",
       reportPath: s.reportPath,
-      usage: { input_tokens: 12, output_tokens: 34 },
+      usage: {
+        input_tokens: 12,
+        output_tokens: 34,
+        cache_read_input_tokens: 5,
+        cache_creation_input_tokens: 6,
+        context_peak: null,
+        cost_usd: 0.01,
+      },
+      raw: claudeResult(),
     });
     assert.equal(docker.callsStarting("run", "--rm").length, 1);
+  });
+
+  it("reads every usage figure, the model and the raw output from a real result", async () => {
+    const { workdir, docker, runner } = setup();
+    const raw = readFileSync(join(import.meta.dirname, "fixtures/claude/result.json"), "utf8");
+    docker.claude = () => ({ code: 0, stdout: raw, stderr: "" });
+    const result = await runner.run(spec(workdir));
+    assert.deepEqual(result.usage, {
+      input_tokens: 9,
+      output_tokens: 410,
+      cache_read_input_tokens: 12000,
+      cache_creation_input_tokens: 3500,
+      // The fullest context of any turn: input + cache read + cache write of the second.
+      context_peak: 6 + 11351 + 137,
+      cost_usd: 0.0412,
+    });
+    assert.equal(result.model, "claude-sonnet-5-5");
+    assert.equal(result.raw, raw);
   });
 
   it("starts the container labelled, on the egress network, as the host user, with the token and proxy", async () => {
@@ -194,6 +220,7 @@ describe("ContainerRunner", () => {
       is_error: true,
       subtype: "success",
       result: "Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+      api_error_status: 401,
       structured_output: undefined,
       usage: {},
     });
@@ -202,9 +229,44 @@ describe("ContainerRunner", () => {
       runner.run(spec(workdir)),
       (e) =>
         e instanceof RunFailure &&
-        e.kind === "failed" &&
+        e.kind === "auth" &&
         e.message.includes("401 OAuth access token is invalid") &&
         e.stdout === stdout,
+    );
+  });
+
+  it("fails with `auth` when Claude says it is not logged in, even with a zero exit", async () => {
+    const { workdir, docker, runner } = setup();
+    docker.claude = () => ({
+      code: 0,
+      stdout: claudeResult({
+        is_error: true,
+        result: "Not logged in · Please run /login",
+        structured_output: undefined,
+      }),
+      stderr: "",
+    });
+    await assert.rejects(
+      runner.run(spec(workdir)),
+      (e) => e instanceof RunFailure && e.kind === "auth" && /Not logged in/.test(e.message),
+    );
+  });
+
+  it("fails with `failed`, not `auth`, on any other Claude error", async () => {
+    const { workdir, docker, runner } = setup();
+    docker.claude = () => ({
+      code: 1,
+      stdout: claudeResult({
+        is_error: true,
+        result: "API Error: 529 overloaded",
+        api_error_status: 529,
+        structured_output: undefined,
+      }),
+      stderr: "",
+    });
+    await assert.rejects(
+      runner.run(spec(workdir)),
+      (e) => e instanceof RunFailure && e.kind === "failed",
     );
   });
 
@@ -227,6 +289,19 @@ describe("ContainerRunner", () => {
     await assert.rejects(
       runner.run(spec(workdir)),
       (e) => e instanceof RunFailure && e.kind === "invalid-result" && /Verdict/.test(e.message),
+    );
+  });
+
+  it("keeps what a Run spent on the failure, when its output says", async () => {
+    const { workdir, docker, runner } = setup();
+    docker.claude = () => ({
+      code: 0,
+      stdout: claudeResult({ structured_output: undefined }),
+      stderr: "",
+    });
+    await assert.rejects(
+      runner.run(spec(workdir)),
+      (e) => e instanceof RunFailure && e.usage?.output_tokens === 34 && e.usage.cost_usd === 0.01,
     );
   });
 

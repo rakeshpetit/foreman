@@ -4,10 +4,16 @@ import { join } from "node:path";
 import { after, afterEach, before, test } from "node:test";
 import { runEngine } from "../src/commands/run.ts";
 import { loadNtfyConfig, ntfyFromConfig } from "../src/notify/config.ts";
-import { engineError, notifySafely, requestDone, taskDone } from "../src/notify/notifier.ts";
+import {
+  engineError,
+  escalation,
+  notifySafely,
+  requestDone,
+  taskDone,
+} from "../src/notify/notifier.ts";
 import { NtfyNotifier } from "../src/notify/ntfy.ts";
 import { FakeRunner } from "../src/runner/fake.ts";
-import type { Runner } from "../src/runner/runner.ts";
+import { RunFailure, type Runner } from "../src/runner/runner.ts";
 import { FakeNtfy } from "./fakes/ntfy/server.ts";
 import { buildingRequest, closeStores, memoryStore, removeTmpDirs, tmpDir } from "./helpers.ts";
 
@@ -190,4 +196,35 @@ test("a Runner that throws sends one engine-error ping, rewrites STATUS.md, stop
   assert.equal(store.listTasks()[0]?.status, "queued");
   assert.equal(store.listEvents().filter((e) => e.type === "stage.crashed").length, 1);
   assert.match(readFileSync(join(dir, "STATUS.md"), "utf8"), /stage\.crashed/);
+});
+
+test("an Escalation parks its Task, sends one high-priority ping and lets the loop carry on", async () => {
+  const store = seed();
+  const [first] = store.listTasks();
+  assert.ok(first);
+  const second = store.createTask({ milestone_id: first.milestone_id, seq: 2, title: "b" });
+  const fresh = new FakeRunner();
+  let failures = 0;
+  const runner: Runner = {
+    // Only the first Task's Runs fail: twice, so its one retry fails as well.
+    run: async (spec) => {
+      if (spec.task === first.id && failures++ < 2) throw new RunFailure("invalid-result", "bad");
+      return fresh.run(spec);
+    },
+  };
+  fake.calls.length = 0;
+  const results = await runEngine(store, {
+    home: home(),
+    untilIdle: true,
+    runner,
+    notifier,
+  });
+  assert.equal(results[0]?.kind, "escalated");
+  assert.equal(store.getTask(first.id)?.status, "parked");
+  assert.equal(store.getTask(second.id)?.status, "done");
+  const pings = fake.calls.filter((c) => c.title === escalation(first.id, "").title);
+  assert.equal(pings.length, 1);
+  assert.equal(pings[0]?.topic, "foreman");
+  assert.equal(pings[0]?.priority, "high");
+  assert.match(pings[0]?.body ?? "", /invalid-result|bad/);
 });

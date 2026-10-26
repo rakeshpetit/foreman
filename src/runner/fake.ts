@@ -8,7 +8,7 @@ export interface FakeStep {
   verdict: Verdict;
   /** Files to write, keyed by path relative to the workdir. */
   files?: Record<string, string>;
-  usage?: Usage;
+  usage?: Partial<Usage>;
 }
 
 /**
@@ -17,7 +17,14 @@ export interface FakeStep {
  */
 export type FakeScript = Record<string, FakeStep[]>;
 
-const NO_USAGE: Usage = { input_tokens: 0, output_tokens: 0 };
+const NO_USAGE: Usage = {
+  input_tokens: 0,
+  output_tokens: 0,
+  cache_read_input_tokens: 0,
+  cache_creation_input_tokens: 0,
+  context_peak: null,
+  cost_usd: 0,
+};
 
 /**
  * Checks a script read from JSON: only `known` Stage and Agent names (any, when `known` is absent),
@@ -63,6 +70,12 @@ export class FakeRunner implements Runner {
     }
     await mkdir(dirname(spec.reportPath), { recursive: true });
     await writeFile(spec.reportPath, `# ${spec.stage} report\n\nverdict: ${step.verdict}\n`);
-    return { verdict: step.verdict, reportPath: spec.reportPath, usage: step.usage ?? NO_USAGE };
+    const usage = { ...NO_USAGE, ...step.usage };
+    return {
+      verdict: step.verdict,
+      reportPath: spec.reportPath,
+      usage,
+      raw: JSON.stringify({ verdict: step.verdict, usage }),
+    };
   }
 }

@@ -194,6 +194,12 @@ This file is also the input format for `foreman import` (M1-T02). From M6 on, fo
   - Save the raw JSON to `$FOREMAN_HOME/runs/<id>.json` and copy the report into `.foreman/R-n/runs/`.
   - A missing output file or an invalid Verdict counts as an *infrastructure* failure: one retry, then an Escalation. It does not cost a Round.
 - **Done when:** a fixture JSON result produces a complete row, and the retry-then-escalate path is tested.
+- **Decisions:**
+  - Every `RunFailure` (timeout, failed container, invalid Verdict) and a Verdict with no report is an infrastructure failure: one retry in the same tick, each attempt its own `runs` row, then an Escalation. Until M5-T06 an Escalation is a `parked` Task, a `task.escalated` event and a high-priority ntfy; the engine goes on to the next Task. M5-T06 must also let a parked Task's dependants proceed once it is answered.
+  - A bad token (`auth`: 401 or "Not logged in") is not retried and parks nothing: the engine stops with an engine-error ntfy, and the Task stays queued, for the Owner to fix the token.
+  - The context peak is the largest context among the calls in `usage.iterations`. Claude's result lists only the last call, so this approximates the peak; exact numbers need `stream-json` (not done).
+  - The report is not copied: the Agent already writes it to `<target repo>/.foreman/R-n/runs/`. M4-T02 commits it from the worktree.
+  - M3-T06's usage-limit check must run before the retry, or a limit will be retried and escalated.
 
 ### M3-T06 · Pause on usage limit
 - **Kind:** core · **Size:** S · **Depends:** M3-T05

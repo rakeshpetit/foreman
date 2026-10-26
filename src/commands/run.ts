@@ -6,6 +6,7 @@ import { type StageExecutor, type TickResult, tick } from "../engine/tick.ts";
 import { STUB_GATES } from "../gates/stub.ts";
 import {
   engineError,
+  escalation,
   type Notifier,
   notifySafely,
   requestDone,
@@ -38,7 +39,7 @@ export function resolveConfigs(store: Store, foremanDir?: string): Map<string, R
   return configs;
 }
 
-/** Ticks the engine, rewriting STATUS.md after every tick. Stops on idle, paused or an error. Returns the tick results. */
+/** Ticks the engine, rewriting STATUS.md after every tick. Stops on idle, paused or an error; an Escalation parks its Task and the loop goes on. Returns the tick results. */
 export async function runEngine(store: Store, opts: RunOptions): Promise<TickResult[]> {
   const results: TickResult[] = [];
   const configFor = configResolver(store, opts.configs, opts.foremanDir);
@@ -46,7 +47,12 @@ export async function runEngine(store: Store, opts: RunOptions): Promise<TickRes
   const gate = gateExecutor(STUB_GATES);
   const executor: StageExecutor = (task, stage) =>
     stageExecutor({
-      agent: agentExecutor({ store, runner: opts.runner, config: configFor(task) }),
+      agent: agentExecutor({
+        store,
+        runner: opts.runner,
+        home: opts.home,
+        config: configFor(task),
+      }),
       gate,
       owner: ownerExecutor,
     })(task, stage);
@@ -55,13 +61,16 @@ export async function runEngine(store: Store, opts: RunOptions): Promise<TickRes
     results.push(result);
     if (opts.notifier) await notifyTick(store, result, opts.notifier);
     writeStatus(store, opts.home);
-    if (result.kind !== "ran") break;
+    if (result.kind !== "ran" && result.kind !== "escalated") break;
   } while (opts.untilIdle);
   return results;
 }
 
 async function notifyTick(store: Store, result: TickResult, notifier: Notifier): Promise<void> {
   if (result.kind === "error") return notifySafely(notifier, engineError(result.message));
+  if (result.kind === "escalated") {
+    return notifySafely(notifier, escalation(result.task, result.message));
+  }
   if (result.kind !== "ran") return;
   if (result.transition.kind === "done") {
     const task = store.getTask(result.task);

@@ -37,7 +37,12 @@ function setup(script: ConstructorParameters<typeof FakeRunner>[0]) {
   const { m } = buildingRequest(s, { title: "r", target_repo: join(dir, "work") });
   const t = s.createTask({ milestone_id: m.id, seq: 1, title: "a" });
   const runner = new FakeRunner(script);
-  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
+  const executor = agentExecutor({
+    store: s,
+    runner,
+    home: tmpDir("foreman-home-"),
+    config: stubConfig(PIPELINE),
+  });
   return { dir, s, t, runner, executor };
 }
 
@@ -87,7 +92,14 @@ test("FakeRunner writes scripted files, the report and returns usage", async () 
     skills: [],
   });
   assert.equal(result.verdict, "PASS");
-  assert.deepEqual(result.usage, { input_tokens: 5, output_tokens: 7 });
+  assert.deepEqual(result.usage, {
+    input_tokens: 5,
+    output_tokens: 7,
+    cache_read_input_tokens: 0,
+    cache_creation_input_tokens: 0,
+    context_peak: null,
+    cost_usd: 0,
+  });
   assert.equal(await readFile(join(dir, "work/src/a.txt"), "utf8"), "hi");
   assert.match(await readFile(result.reportPath, "utf8"), /verdict: PASS/);
 });
@@ -120,7 +132,12 @@ test("the executor runs each Task in its own Request's repo, not the first build
   const { m: m2 } = buildingRequest(s, { title: "second", target_repo: join(dir, "second") }, "m2");
   const t = s.createTask({ milestone_id: m2.id, seq: 1, title: "b" });
   const runner = new FakeRunner({});
-  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
+  const executor = agentExecutor({
+    store: s,
+    runner,
+    home: tmpDir("foreman-home-"),
+    config: stubConfig(PIPELINE),
+  });
   assert.equal((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind, "ran");
   assert.deepEqual(
     runner.calls.map((c) => [c.task, c.workdir]),
@@ -145,6 +162,7 @@ test("the executor records each Run with its verdict, usage and report, and the 
   assert.ok(run.report_path && existsSync(run.report_path));
 
   const boom = agentExecutor({
+    home: dir,
     config: stubConfig(PIPELINE),
     store: s,
     runner: {
@@ -162,7 +180,12 @@ test("the executor records each Run with its verdict, usage and report, and the 
 
 test('require = "all": one failing reviewer fails the Stage, every reviewer still runs, and it costs a Round', async () => {
   const { s, t, runner } = setup({ "critic-b": [{ verdict: "FAIL" }] });
-  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
+  const executor = agentExecutor({
+    store: s,
+    runner,
+    home: tmpDir("foreman-home-"),
+    config: stubConfig(PIPELINE),
+  });
   while ((await tick(s, { pipelineFor: () => PIPELINE, executor })).kind === "ran") {
     if (s.getTask(t.id)?.round_total) break;
   }
@@ -195,7 +218,12 @@ review = ["critic-a", "critic-b"]
   const stage = any.stages[0];
   assert.ok(stage);
   const { s, t, runner } = setup({ "critic-a": [{ verdict: "PASS" }, { verdict: "FAIL" }] });
-  const executor = agentExecutor({ store: s, runner, config: stubConfig(PIPELINE) });
+  const executor = agentExecutor({
+    store: s,
+    runner,
+    home: tmpDir("foreman-home-"),
+    config: stubConfig(PIPELINE),
+  });
   const task = s.getTask(t.id);
   assert.ok(task);
   assert.equal(await executor(task, stage), "PASS");
@@ -317,6 +345,7 @@ review = ["reviewer-standards"]
   const executor = agentExecutor({
     store: s,
     runner,
+    home: dir,
     config: stubConfig(pipeline, ["reviewer-spec"], { [chosen.id]: { review: ["reviewer-spec"] } }),
   });
   const stage = pipeline.stages[0];
@@ -343,6 +372,7 @@ test("an Agent the config does not load fails the Run, which records the error",
   const executor = agentExecutor({
     store: s,
     runner,
+    home: tmpDir("foreman-home-"),
     config: { ...stubConfig(PIPELINE), agents: new Map() },
   });
   await assert.rejects(executor(task, stageNamed("workup")), /unknown agent "writer"/);

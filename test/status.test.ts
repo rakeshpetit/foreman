@@ -87,3 +87,9 @@ test("writeStatus writes atomically, leaving no temp file", () => {
   assert.equal(readFileSync(path, "utf8"), render(mixed()));
   assert.deepEqual(readdirSync(home), ["STATUS.md"]);
 });
+
+test("a parked Task waits on the Owner, is listed", () => {
+  const s = mixed();
+  s.updateTask("T-2", { status: "parked" });
+  assert.match(render(s), /## Waiting on the Owner\n[^#]*- T-2: b \(parked\)\n/);
+});

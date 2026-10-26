@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { type Docker, tail } from "../docker/docker.ts";
 import { BASE_IMAGE, EGRESS, type Egress, ensureEgress, proxyEnv } from "../docker/images.ts";
-import { RunFailure, type Runner, type RunResult, type RunSpec } from "./runner.ts";
+import { RunFailure, type Runner, type RunResult, type RunSpec, type Usage } from "./runner.ts";
 
 /** Where the worktree is mounted, and so where the Agent sees every path of its Run. */
 const WORK = "/work";
@@ -30,14 +30,39 @@ export interface ContainerRunnerOptions {
   egress?: Egress;
 }
 
+const tokenCount = z.number().default(0);
+
 /** What `claude -p --output-format json` prints, as far as a Run needs it. */
 const claudeOutput = z.object({
   is_error: z.boolean().default(false),
+  api_error_status: z.number().nullish(),
   result: z.string().optional(),
   structured_output: z.object({ verdict: z.string() }).optional(),
+  total_cost_usd: tokenCount,
   usage: z
-    .object({ input_tokens: z.number().default(0), output_tokens: z.number().default(0) })
-    .default({ input_tokens: 0, output_tokens: 0 }),
+    .object({
+      input_tokens: tokenCount,
+      output_tokens: tokenCount,
+      cache_read_input_tokens: tokenCount,
+      cache_creation_input_tokens: tokenCount,
+      // One entry per call to the model: the context a call sent is its input plus both caches.
+      iterations: z
+        .array(
+          z.object({
+            input_tokens: tokenCount,
+            cache_read_input_tokens: tokenCount,
+            cache_creation_input_tokens: tokenCount,
+          }),
+        )
+        .optional(),
+    })
+    .default({
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+    }),
+  modelUsage: z.record(z.string(), z.unknown()).optional(),
 });
 
 /**
@@ -103,7 +128,11 @@ export class ContainerRunner implements Runner {
     if (outcome.code !== 0) {
       const output = readOutput(outcome.stdout);
       const why = (output?.is_error && output.result) || tail(outcome.stderr);
-      throw new RunFailure("failed", `${name} exited ${outcome.code}: ${why}`, outcome.stdout);
+      throw new RunFailure(
+        failureKind(output),
+        `${name} exited ${outcome.code}: ${why}`,
+        outcome.stdout,
+      );
     }
     return outcome.stdout;
   }
@@ -195,18 +224,50 @@ function readOutput(stdout: string): z.output<typeof claudeOutput> | undefined {
   }
 }
 
+/**
+ * `auth` for a 401 or "Not logged in": the token is bad or expired (docs/spikes/claude-in-container.md).
+ * Any other error Claude reports, or none, is `failed`.
+ */
+function failureKind(output: z.output<typeof claudeOutput> | undefined): "auth" | "failed" {
+  const auth =
+    output?.is_error &&
+    (output.api_error_status === 401 || /Not logged in/.test(output.result ?? ""));
+  return auth ? "auth" : "failed";
+}
+
+function usageOf({ usage, total_cost_usd }: z.output<typeof claudeOutput>): Usage {
+  const contexts = (usage.iterations ?? []).map(
+    (i) => i.input_tokens + i.cache_read_input_tokens + i.cache_creation_input_tokens,
+  );
+  return {
+    input_tokens: usage.input_tokens,
+    output_tokens: usage.output_tokens,
+    cache_read_input_tokens: usage.cache_read_input_tokens,
+    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+    context_peak: contexts.length > 0 ? Math.max(...contexts) : null,
+    cost_usd: total_cost_usd,
+  };
+}
+
 function parseResult(stdout: string, spec: RunSpec): RunResult {
-  const invalid = (why: string) => new RunFailure("invalid-result", why, stdout);
   const output = readOutput(stdout);
-  if (!output) throw invalid(`claude's output is not a result: ${tail(stdout).slice(0, 200)}`);
-  const { is_error, result, structured_output, usage } = output;
-  if (is_error) throw new RunFailure("failed", `claude reported an error: ${result}`, stdout);
+  if (!output) {
+    const why = `claude's output is not a result: ${tail(stdout).slice(0, 200)}`;
+    throw new RunFailure("invalid-result", why, stdout);
+  }
+  const { is_error, result, structured_output } = output;
+  const usage = usageOf(output);
+  if (is_error) {
+    throw new RunFailure(failureKind(output), `claude reported an error: ${result}`, stdout, usage);
+  }
 
   const allowed = spec.verdictSchema.properties.verdict.enum;
   const verdict = allowed.find((v) => v === structured_output?.verdict);
   if (!verdict) {
     const got = structured_output ? `Verdict ${structured_output.verdict}` : "no Verdict";
-    throw invalid(`${got} in the result; this Agent may give ${allowed.join(", ")}`);
+    const why = `${got} in the result; this Agent may give ${allowed.join(", ")}`;
+    throw new RunFailure("invalid-result", why, stdout, usage);
   }
-  return { verdict, reportPath: spec.reportPath, usage };
+  const [model] = Object.keys(output.modelUsage ?? {});
+  return { verdict, reportPath: spec.reportPath, usage, ...(model && { model }), raw: stdout };
 }
