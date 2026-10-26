@@ -5,6 +5,8 @@ import { showConfig } from "../commands/config.ts";
 import { resolveConfigs, runEngine } from "../commands/run.ts";
 import { ConfigFileError } from "../config/issues.ts";
 import { scriptNames } from "../config/pipeline.ts";
+import { CliDocker, type Docker, DockerError } from "../docker/docker.ts";
+import { buildImages } from "../docker/images.ts";
 import { importPlan } from "../importer/import.ts";
 import { ImportError } from "../importer/parse.ts";
 import { ntfyFromConfig } from "../notify/config.ts";
@@ -28,6 +30,8 @@ export interface Context {
   err: (line: string) => void;
   runner?: Runner;
   notifier?: Notifier;
+  /** The `docker` CLI (default: the real one). A test seam. */
+  docker?: Docker;
   /** foreman's own checkout, for `loadConfig` (default: this one). A test seam. */
   foremanDir?: string;
 }
@@ -42,6 +46,7 @@ Commands:
   run [--until-idle] [--fake <script.json>]
                                    Run the engine (one tick, or until idle) with a FakeRunner
   config show <R> [--task <T>]     Print a Request's resolved config and where each value came from
+  images build                     Build the Agent base image and the egress proxy image
   status                           Print STATUS.md
   pause                            Pause the queue
   resume                           Resume the queue
@@ -53,7 +58,7 @@ Environment:
                                    $FOREMAN_HOME/config.toml. Pings need a server and topic
 `;
 
-const COMMANDS = new Set(["import", "go", "run", "config", "status", "pause", "resume"]);
+const COMMANDS = new Set(["import", "go", "run", "config", "images", "status", "pause", "resume"]);
 const STATE_CHANGING = new Set(["import", "go", "pause", "resume"]);
 
 export async function main(argv: string[], ctx: Context): Promise<number> {
@@ -89,7 +94,9 @@ export async function main(argv: string[], ctx: Context): Promise<number> {
     return code;
   } catch (e) {
     // Expected failures are one line (ImportError already carries "line N:"); anything else keeps its stack.
-    if (e instanceof ImportError || e instanceof ConfigFileError) return fail(ctx, e.message);
+    if (e instanceof ImportError || e instanceof ConfigFileError || e instanceof DockerError) {
+      return fail(ctx, e.message);
+    }
     if (e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT") {
       return fail(ctx, e.message);
     }
@@ -183,6 +190,14 @@ async function dispatch(
         return fail(ctx, "Usage: foreman config show <R> [--task <T>]");
       }
       ctx.out(showConfig(store, id, { task: values.task }));
+      return 0;
+    }
+    case "images": {
+      if (rest[0] !== "build" || rest.length > 1) return fail(ctx, "Usage: foreman images build");
+      await buildImages(ctx.docker ?? new CliDocker(), {
+        foremanDir: ctx.foremanDir,
+        onBuilt: (image) => ctx.out(`Built ${image.name}`),
+      });
       return 0;
     }
     case "status":

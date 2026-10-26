@@ -13,6 +13,8 @@ npm run check           # Biome + tsc --noEmit + node --test
 npm run typecheck       # tsc --noEmit alone
 npm test                # node --test alone
 node src/cli/main.ts --version
+node src/cli/main.ts images build   # the Agent base image and the egress proxy image
+FOREMAN_DOCKER_TESTS=1 npm test     # also builds them and runs the allow and deny checks (needs Docker)
 ```
 
 No build step: Node runs the TypeScript directly (type stripping).

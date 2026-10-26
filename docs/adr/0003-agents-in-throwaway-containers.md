@@ -1,5 +1,5 @@
 ---
-status: accepted (grilled to shared understanding 2026-10-26; not yet built)
+status: accepted (grilled to shared understanding 2026-10-26; images and egress network built in M3-T03; the Runner that uses them is not yet built)
 ---
 
 # Agents run in throwaway containers with no git credentials; only foreman touches remotes
@@ -23,3 +23,4 @@ An unattended `claude -p` needs `--dangerously-skip-permissions`, or it stops at
 - Mobile simulators cannot run in these containers (ADR 0008).
 - **Confirmed by the M3-T01 spike** ([claude-in-container](../spikes/claude-in-container.md)): `CLAUDE_CODE_OAUTH_TOKEN` from an `--env-file` authenticates `claude -p` in a container. `--dangerously-skip-permissions` is refused as root, so every Agent image needs a non-root `agent` user, and the mounted worktree must be writable by it.
 - **Confirmed by the M3-T02 spike** ([egress](../spikes/egress.md)): an `internal: true` network plus an allowlisting tinyproxy container lets an Agent container reach only Anthropic, npm and PyPI. `github.com` is refused. The connections tried that bypassed the proxy all failed, and no fallback is needed. An allowed host can still be used to send data out, so the Run's token and the worktree remain the things to protect.
+- **Built in M3-T03:** `images/base` (Node 24, git, Python 3 + `uv`, pinned Claude Code, uid-1000 `agent` user) and `images/egress-proxy`, both from `foreman images build`. Until per-Agent images arrive, every Run uses the base image.

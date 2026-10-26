@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { main, version } from "../src/cli/main.ts";
 import { Store } from "../src/store/store.ts";
+import { FakeDocker } from "./fakes/docker/docker.ts";
 import { removeTmpDirs, tmpDir } from "./helpers.ts";
 
 afterEach(removeTmpDirs);
@@ -49,7 +50,7 @@ function cli(foremanDir?: string) {
 test("--help lists the commands", async () => {
   const { run, out } = cli();
   assert.equal(await run("--help"), 0);
-  for (const c of ["import", "go", "run", "config", "status", "pause", "resume"]) {
+  for (const c of ["import", "go", "run", "config", "images", "status", "pause", "resume"]) {
     assert.match(out.join("\n"), new RegExp(`^  ${c}\\b`, "m"));
   }
 });
@@ -372,4 +373,42 @@ test("run refuses to start when foreman's defaults/pipeline.toml is broken, nami
   } finally {
     store.close();
   }
+});
+
+function imagesCli(docker: FakeDocker) {
+  const { root, home } = cli();
+  const out: string[] = [];
+  const err: string[] = [];
+  const run = (...argv: string[]) =>
+    main(argv, {
+      env: { FOREMAN_HOME: home },
+      cwd: root,
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+      docker,
+    });
+  return { run, out, err };
+}
+
+test("images build builds both images through docker and reports each", async () => {
+  const docker = new FakeDocker();
+  const { run, out } = imagesCli(docker);
+  assert.equal(await run("images", "build"), 0);
+  assert.deepEqual(out, ["Built foreman-base", "Built foreman-egress-proxy"]);
+  assert.equal(docker.callsStarting("build").length, 2);
+});
+
+test("images build with a failing docker build prints one line and exits 1", async () => {
+  const docker = new FakeDocker();
+  docker.failOn = { prefix: ["build"], stderr: "boom" };
+  const { run, err } = imagesCli(docker);
+  assert.equal(await run("images", "build"), 1);
+  assert.equal(err.length, 1);
+  assert.match(err[0] ?? "", /docker build failed.*boom/s);
+});
+
+test("images with anything but build prints usage", async () => {
+  const { run, err } = imagesCli(new FakeDocker());
+  assert.equal(await run("images"), 1);
+  assert.match(err[0] ?? "", /Usage: foreman images build/);
 });
