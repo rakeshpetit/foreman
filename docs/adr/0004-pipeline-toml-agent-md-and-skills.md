@@ -29,7 +29,7 @@ The Owner must be able to configure every Stage in detail, and to keep several k
 
 - **Stages defined in TypeScript:** rejected, because changing a Stage would mean a code change and a rebuild.
 - **A router Agent that picks Agents for each Task:** rejected, because selection by Kind is predictable and adding an Agent is just a config edit.
-- **Generating Claude Code's native `.claude/agents/*.md` subagents instead of a custom launch:** to be checked during v0. The AGENT.md format the Owner edits stays the same either way.
+- **Generating Claude Code's native `.claude/agents/*.md` subagents instead of a custom launch:** checked in the M3-T01 spike ([claude-in-container](../spikes/claude-in-container.md)). `--agents <file>` plus `--agent` carries the role prompt, but its `skills` field does not preload Skill content, so the custom launch stays. The AGENT.md format the Owner edits is unchanged.
 
 ## Consequences
 

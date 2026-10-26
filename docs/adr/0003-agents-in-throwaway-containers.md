@@ -21,3 +21,4 @@ An unattended `claude -p` needs `--dangerously-skip-permissions`, or it stops at
 
 - Each Agent image has to carry the Target repo's toolchain. Images are set per Agent in AGENT.md (ADR 0004).
 - Mobile simulators cannot run in these containers (ADR 0008).
+- **Confirmed by the M3-T01 spike** ([claude-in-container](../spikes/claude-in-container.md)): `CLAUDE_CODE_OAUTH_TOKEN` from an `--env-file` authenticates `claude -p` in a container. `--dangerously-skip-permissions` is refused as root, so every Agent image needs a non-root `agent` user, and the mounted worktree must be writable by it.
