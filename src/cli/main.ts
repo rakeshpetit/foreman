@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { showConfig } from "../commands/config.ts";
-import { runEngine } from "../commands/run.ts";
+import { resolvePipelines, runEngine } from "../commands/run.ts";
 import { AgentError } from "../config/agent.ts";
 import { ConfigError } from "../config/layers.ts";
 import {
@@ -145,14 +145,18 @@ async function dispatch(
       return 0;
     }
     case "run": {
+      // Resolve every building Request's config first: a broken one refuses the whole run.
       const pipeline = loadPipeline(DEFAULT_PIPELINE_PATH, {
         gates: new Set(Object.keys(STUB_GATES)),
       });
+      const pipelines = resolvePipelines(store);
       let runner = ctx.runner;
       if (!runner && values.fake !== undefined) {
         try {
           const json: unknown = JSON.parse(readFileSync(resolve(ctx.cwd, values.fake), "utf8"));
-          runner = new FakeRunner(parseFakeScript(json, scriptNames(pipeline)));
+          runner = new FakeRunner(
+            parseFakeScript(json, scriptNames([pipeline, ...pipelines.values()])),
+          );
         } catch (e) {
           const why = e instanceof Error ? e.message : String(e);
           return fail(ctx, `Cannot read --fake script ${values.fake}: ${why}`);
@@ -170,6 +174,7 @@ async function dispatch(
         untilIdle: values["until-idle"] ?? false,
         runner,
         pipeline,
+        pipelines,
         notifier,
       });
       const ran = results.filter((r) => r.kind === "ran").length;
@@ -203,15 +208,17 @@ async function dispatch(
   }
 }
 
-/** The names a `--fake` script may key its steps by: every Stage and every Agent in the Pipeline. */
-function scriptNames(pipeline: Pipeline): Set<string> {
+/** The names a `--fake` script may key its steps by: every Stage and every Agent in the Pipelines. */
+function scriptNames(pipelines: Pipeline[]): Set<string> {
   const names = new Set<string>();
-  for (const s of pipeline.stages) {
-    names.add(s.name);
-    for (const a of s.agents ?? []) names.add(a);
-  }
-  for (const byStage of Object.values(pipeline.kinds)) {
-    for (const agents of Object.values(byStage)) for (const a of agents) names.add(a);
+  for (const pipeline of pipelines) {
+    for (const s of pipeline.stages) {
+      names.add(s.name);
+      for (const a of s.agents ?? []) names.add(a);
+    }
+    for (const byStage of Object.values(pipeline.kinds)) {
+      for (const agents of Object.values(byStage)) for (const a of agents) names.add(a);
+    }
   }
   return names;
 }

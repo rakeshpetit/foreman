@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 import { main } from "../src/cli/main.ts";
@@ -137,4 +137,128 @@ test("tracer: import → go → run --until-idle on the default Pipeline, with a
   } finally {
     await ntfy.stop();
   }
+});
+
+/** A Target repo's `.foreman/config.toml`, written before the Request is imported. */
+function targetConfig(root: string, toml: string): void {
+  mkdirSync(join(root, ".foreman"), { recursive: true });
+  writeFileSync(join(root, ".foreman", "config.toml"), toml);
+}
+
+function cli() {
+  const root = tmpDir("foreman-e2e-");
+  const home = join(root, "home");
+  const out: string[] = [];
+  const err: string[] = [];
+  const runner = new FakeRunner();
+  const run = (...argv: string[]) =>
+    main(argv, {
+      env: { FOREMAN_HOME: home },
+      cwd: root,
+      out: (l) => out.push(l),
+      err: (l) => err.push(l),
+      runner,
+    });
+  return { root, home, out, err, run, runner };
+}
+
+test("Kinds route to different Agents, and an override recorded at Go wins", async () => {
+  const { root, home, run } = cli();
+  // The fixture plan's Tasks: T-1 core, T-2 cli, T-3 core, T-4 core.
+  targetConfig(
+    root,
+    `[kinds.core]
+implement = ["implementer-core"]
+
+[kinds.cli]
+implement = ["implementer-cli"]
+review = ["reviewer-standards", "reviewer-cli"]
+`,
+  );
+  assert.equal(await run("import", root, FIXTURE_PLAN), 0);
+  assert.equal(await run("go", "R-1"), 0);
+  // What Go records for a Task the Owner gave its own Agents (M5-T08 adds the flag).
+  const seed = Store.open(home);
+  try {
+    seed.updateTask("T-4", { agent_overrides: JSON.stringify({ review: ["reviewer-override"] }) });
+  } finally {
+    seed.close();
+  }
+  assert.equal(await run("run", "--until-idle"), 0);
+
+  const store = Store.open(home);
+  try {
+    // Each Task's Agents, per Stage, in the order its Runs started. A rework Round would repeat them.
+    const agentsOf = (task: string) => {
+      const byStage = new Map<string, string[]>();
+      for (const r of store.listRuns().filter((x) => x.task_id === task)) {
+        if (r.stage === null || r.agent === null) continue;
+        byStage.set(r.stage, [...(byStage.get(r.stage) ?? []), r.agent]);
+      }
+      return Object.fromEntries(byStage);
+    };
+    const defaults = { review: ["reviewer-standards", "reviewer-spec"], verify: ["verifier-api"] };
+    assert.deepEqual(agentsOf("T-1"), {
+      workup: ["workup-tdd"],
+      implement: ["implementer-core"],
+      ...defaults,
+      research: ["researcher-task"],
+    });
+    assert.deepEqual(agentsOf("T-2"), {
+      workup: ["workup-tdd"],
+      implement: ["implementer-cli"],
+      review: ["reviewer-standards", "reviewer-cli"],
+      verify: ["verifier-api"],
+      research: ["researcher-task"],
+    });
+    assert.deepEqual(agentsOf("T-4"), {
+      workup: ["workup-tdd"],
+      implement: ["implementer-core"],
+      review: ["reviewer-override"],
+      verify: ["verifier-api"],
+      research: ["researcher-task"],
+    });
+    assert.ok(store.listTasks().every((t) => t.status === "done"));
+  } finally {
+    store.close();
+  }
+});
+
+for (const [name, toml, message] of [
+  [
+    "a stage routing to an unknown stage",
+    `[[stages]]
+name = "implement"
+type = "agent"
+agents = ["implementer-tdd"]
+on_fail = "nowhere"
+`,
+    /nowhere/,
+  ],
+  ["TOML that does not parse", "[[stages]\n", /\.foreman\/config\.toml: not valid TOML/],
+  ["an unknown top-level key", 'pipeline = "x"\n', /unknown key "pipeline"/],
+] as const) {
+  test(`run refuses to start on ${name}, and names the error`, async () => {
+    const { root, home, run, err, runner } = cli();
+    targetConfig(root, toml);
+    assert.equal(await run("import", root, FIXTURE_PLAN), 0);
+    assert.equal(await run("go", "R-1"), 0);
+    assert.equal(await run("run", "--until-idle"), 1);
+    assert.match(err.join("\n"), message);
+    assert.equal(runner.calls.length, 0);
+    const store = Store.open(home);
+    try {
+      assert.equal(store.listRuns().length, 0);
+      assert.ok(store.listTasks().every((t) => t.status === "queued"));
+    } finally {
+      store.close();
+    }
+  });
+}
+
+test("a broken config does not stop `run` on a Request that is not building", async () => {
+  const { root, run } = cli();
+  targetConfig(root, "[[stages]\n");
+  assert.equal(await run("import", root, FIXTURE_PLAN), 0);
+  assert.equal(await run("run", "--until-idle"), 0);
 });
