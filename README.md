@@ -15,6 +15,7 @@ npm test                # node --test alone
 node src/cli/main.ts --version
 node src/cli/main.ts images build   # the Agent base image and the egress proxy image
 FOREMAN_DOCKER_TESTS=1 npm test     # also builds them and runs the allow and deny checks (needs Docker)
+npm run smoke                       # one real Run in a real container, on your token (needs Docker and $FOREMAN_HOME/claude.env); not part of check
 ```
 
 No build step: Node runs the TypeScript directly (type stripping).

@@ -11,6 +11,7 @@
   },
   "scripts": {
     "check": "biome check . && tsc --noEmit && node --test 'test/**/*.test.ts'",
+    "smoke": "node src/smoke/smoke.ts",
     "prepare": "git rev-parse --git-dir >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
     "test": "node --test 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit"

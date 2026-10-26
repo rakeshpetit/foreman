@@ -217,6 +217,9 @@ This file is also the input format for `foreman import` (M1-T02). From M6 on, fo
 - **Kind:** integration · **Size:** S · **Depends:** M3-T05
 - **Do:** `npm run smoke` makes one real Run (a trivial Agent that writes `hello.md` with Verdict `PASS`) in a real container, and prints the recorded row.
 - **Done when:** it passes on your Mac with your subscription token. It is not part of `npm run check`.
+- **Decisions:**
+  - It builds the images first, runs against a throwaway repo and an in-memory Store, and removes both afterwards. The token comes from `$FOREMAN_HOME/claude.env`. `test/smoke.test.ts` covers its logic through the fake `docker`.
+  - First real run (2026-10-26): `PASS`, `hello.md` written, one `runs` row with tokens, cost and duration. `context_peak` was null: the real result had no `usage.iterations`, so the M3-T05 approximation yields nothing for a one-call Run.
 
 ---
 
