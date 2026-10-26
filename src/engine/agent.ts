@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { StageConfig } from "../config/pipeline.ts";
 import type { Runner } from "../runner/runner.ts";
 import type { Store, TaskRow } from "../store/store.ts";
 import type { Verdict } from "./route.ts";
@@ -7,6 +8,8 @@ import type { StageExecutor } from "./tick.ts";
 export interface AgentExecutorOptions {
   store: Store;
   runner: Runner;
+  /** Which Agents run a Stage for a Task (`agentsFor`). Defaults to the Stage's own `agents`. */
+  agentsFor?: (task: TaskRow, stage: StageConfig) => string[];
 }
 
 /**
@@ -17,7 +20,7 @@ export interface AgentExecutorOptions {
 export function agentExecutor(opts: AgentExecutorOptions): StageExecutor {
   return async (task, stage) => {
     let passed = 0;
-    const agents = stage.agents ?? [];
+    const agents = opts.agentsFor?.(task, stage) ?? stage.agents ?? [];
     for (const agent of agents) {
       const verdict = await runAgent(opts, task, stage.name, agent);
       if (verdict === "PASS") {

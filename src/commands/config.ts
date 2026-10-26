@@ -1,10 +1,8 @@
-import { z } from "zod";
+import { parseTaskAgents } from "../config/agents.ts";
 import type { RequestOverrides } from "../config/layers.ts";
 import { ConfigError, describeConfig, formatEntries, loadConfig } from "../config/layers.ts";
 import { STUB_GATES } from "../engine/executors.ts";
 import type { RequestRow, Store } from "../store/store.ts";
-
-const taskAgentsSchema = z.record(z.string(), z.array(z.string().min(1)).min(1));
 
 /** The Request's own settings: its Mode, and the per-Task Agent overrides recorded on its Tasks. */
 function requestOverrides(store: Store, request: RequestRow): RequestOverrides {
@@ -12,14 +10,7 @@ function requestOverrides(store: Store, request: RequestRow): RequestOverrides {
   const taskAgents: NonNullable<RequestOverrides["taskAgents"]> = {};
   for (const m of store.listMilestones(requestId)) {
     for (const t of store.listTasks(m.id)) {
-      if (t.agent_overrides === null) continue;
-      try {
-        taskAgents[t.id] = taskAgentsSchema.parse(JSON.parse(t.agent_overrides));
-      } catch {
-        throw new ConfigError([
-          `${t.id}: agent_overrides is not a {"<stage>": ["<agent>", ...]} object`,
-        ]);
-      }
+      if (t.agent_overrides !== null) taskAgents[t.id] = parseTaskAgents(t);
     }
   }
   return { id: requestId, mode: request.mode, taskAgents };

@@ -1,3 +1,4 @@
+import { agentsFor } from "../config/agents.ts";
 import type { Pipeline } from "../config/pipeline.ts";
 import { agentExecutor } from "../engine/agent.ts";
 import {
@@ -32,7 +33,11 @@ export interface RunOptions {
 export async function runEngine(store: Store, opts: RunOptions): Promise<TickResult[]> {
   const results: TickResult[] = [];
   const executor = stageExecutor({
-    agent: agentExecutor({ store, runner: opts.runner }),
+    agent: agentExecutor({
+      store,
+      runner: opts.runner,
+      agentsFor: (task, stage) => agentsFor(opts.pipeline, task, stage),
+    }),
     gate: gateExecutor(opts.gates ?? STUB_GATES),
     owner: ownerExecutor,
   });

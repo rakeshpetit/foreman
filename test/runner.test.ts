@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
+import { agentsFor } from "../src/config/agents.ts";
 import { DEFAULT_PIPELINE_PATH, loadPipeline, parsePipeline } from "../src/config/pipeline.ts";
 import { agentExecutor } from "../src/engine/agent.ts";
 import { gateExecutor, ownerExecutor, STUB_GATES, stageExecutor } from "../src/engine/executors.ts";
@@ -244,4 +245,51 @@ test("stageExecutor sends each Stage to the executor for its type; the owner stu
   assert.equal(await executor(task, gate), "FAIL");
   assert.equal(await executor(task, owner), "PASS");
   assert.deepEqual(calls, ["agent", "gate"]);
+});
+
+test("the executor runs the Agents agentsFor picks for the Task's Kind, and an override wins", async () => {
+  const dir = tmpDir("foreman-runner-");
+  const s = new Store(":memory:");
+  const { m } = buildingRequest(s, { title: "r", target_repo: join(dir, "work") });
+  const pipeline = parsePipeline(`
+[[stages]]
+name = "review"
+type = "agent"
+agents = ["reviewer-standards"]
+on_fail = "review"
+
+[kinds.ui]
+review = ["reviewer-ui"]
+`);
+  const ui = s.createTask({ milestone_id: m.id, seq: 1, title: "a", kind: "ui", stage: "review" });
+  const other = s.createTask({ milestone_id: m.id, seq: 2, title: "b", stage: "review" });
+  const chosen = s.createTask({
+    milestone_id: m.id,
+    seq: 3,
+    title: "c",
+    kind: "ui",
+    stage: "review",
+  });
+  s.updateTask(chosen.id, { agent_overrides: JSON.stringify({ review: ["reviewer-spec"] }) });
+  const runner = new FakeRunner({});
+  const executor = agentExecutor({
+    store: s,
+    runner,
+    agentsFor: (task, stage) => agentsFor(pipeline, task, stage),
+  });
+  const stage = pipeline.stages[0];
+  assert.ok(stage);
+  for (const t of [ui, other, chosen]) {
+    const row = s.getTask(t.id);
+    assert.ok(row);
+    await executor(row, stage);
+  }
+  assert.deepEqual(
+    runner.calls.map((c) => [c.task, c.agent]),
+    [
+      [ui.id, "reviewer-ui"],
+      [other.id, "reviewer-standards"],
+      [chosen.id, "reviewer-spec"],
+    ],
+  );
 });
