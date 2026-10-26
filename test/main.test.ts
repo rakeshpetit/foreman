@@ -140,7 +140,8 @@ test("run --until-idle finishes Tasks, writes STATUS.md; without go nothing runs
   assert.equal(out.at(-1), "Ran 0 stages");
   await run("go", "R-1");
   assert.equal(await run("run", "--until-idle", "--fake", fake), 0);
-  assert.equal(out.at(-1), "Ran 6 stages");
+  // 2 Tasks x the 9 Stages of the default Pipeline.
+  assert.equal(out.at(-1), "Ran 18 stages");
   assert.match(readFileSync(join(home, "STATUS.md"), "utf8"), /Phase: done/);
 });
 
@@ -235,13 +236,13 @@ test("run --fake with a missing script fails and leaves every Task queued", asyn
   }
 });
 
-test("run --fake with an unknown Verdict or Stage fails and leaves every Task queued", async () => {
+test("run --fake with an unknown Verdict or Stage or Agent fails and leaves every Task queued", async () => {
   const { run, plan, root, home, err, fake } = cli();
   await run("import", root, plan);
   await run("go", "R-1");
   for (const [script, why] of [
     [{ review: [{ verdict: "pass" }] }, /verdict must be one of PASS, FAIL/],
-    [{ deploy: [] }, /unknown stage "deploy"/],
+    [{ deploy: [] }, /unknown stage or agent "deploy"/],
   ] as const) {
     writeFileSync(fake, JSON.stringify(script));
     assert.equal(await run("run", "--until-idle", "--fake", fake), 1);

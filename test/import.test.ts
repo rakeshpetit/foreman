@@ -200,6 +200,7 @@ test("a Task's file_path comes from its own ID", () => {
   importPlan(store, repo, FIXTURE_PLAN);
   for (const t of store.listTasks()) {
     assert.equal(t.file_path, join(".foreman", "R-1", "tasks", `${t.id}.md`));
-    assert.equal(t.stage, "workup");
+    // The engine picks the first Stage from the Pipeline, so the importer sets none.
+    assert.equal(t.stage, null);
   }
 });

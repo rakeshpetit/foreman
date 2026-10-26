@@ -1,4 +1,12 @@
+import type { Pipeline } from "../config/pipeline.ts";
 import { agentExecutor } from "../engine/agent.ts";
+import {
+  type GateRegistry,
+  gateExecutor,
+  ownerExecutor,
+  STUB_GATES,
+  stageExecutor,
+} from "../engine/executors.ts";
 import { type TickResult, tick } from "../engine/tick.ts";
 import {
   engineError,
@@ -15,15 +23,21 @@ export interface RunOptions {
   home: string;
   untilIdle: boolean;
   runner: Runner;
+  pipeline: Pipeline;
+  gates?: GateRegistry;
   notifier?: Notifier;
 }
 
 /** Ticks the engine, rewriting STATUS.md after every tick. Stops on idle, paused or an error. Returns the tick results. */
 export async function runEngine(store: Store, opts: RunOptions): Promise<TickResult[]> {
   const results: TickResult[] = [];
+  const executor = stageExecutor({
+    agent: agentExecutor({ store, runner: opts.runner }),
+    gate: gateExecutor(opts.gates ?? STUB_GATES),
+    owner: ownerExecutor,
+  });
   do {
-    const executor = agentExecutor({ store, runner: opts.runner });
-    const result = await tick(store, { executor });
+    const result = await tick(store, { pipeline: opts.pipeline, executor });
     results.push(result);
     if (opts.notifier) await notifyTick(store, result, opts.notifier);
     writeStatus(store, opts.home);

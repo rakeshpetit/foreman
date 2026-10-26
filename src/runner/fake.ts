@@ -1,6 +1,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { PIPELINE, type Stage, VERDICTS, type Verdict } from "../engine/route.ts";
+import { VERDICTS, type Verdict } from "../engine/route.ts";
 import type { Runner, RunResult, RunSpec, Usage } from "./runner.ts";
 
 export interface FakeStep {
@@ -10,19 +10,24 @@ export interface FakeStep {
   usage?: Usage;
 }
 
-/** Per Stage, the steps to play in order; once exhausted (or unscripted) a Stage passes. */
-export type FakeScript = Partial<Record<Stage, FakeStep[]>>;
+/**
+ * Per Agent name or Stage name, the steps to play in order; once exhausted (or unscripted) a Run
+ * passes. A Run uses its Agent's steps if the script has any for that name, else its Stage's.
+ */
+export type FakeScript = Record<string, FakeStep[]>;
 
 const NO_USAGE: Usage = { input_tokens: 0, output_tokens: 0 };
 
-/** Checks a script read from JSON: known Stages only, and every step has a Verdict foreman knows. */
-export function parseFakeScript(json: unknown): FakeScript {
+/** Checks a script read from JSON: only `known` Stage and Agent names, and every step has a Verdict foreman knows. */
+export function parseFakeScript(json: unknown, known: ReadonlySet<string>): FakeScript {
   if (typeof json !== "object" || json === null || Array.isArray(json)) {
-    throw new Error("a script is an object of Stage → steps");
+    throw new Error("a script is an object of Stage or Agent → steps");
   }
   for (const [stage, steps] of Object.entries(json)) {
-    if (!(PIPELINE as readonly string[]).includes(stage)) {
-      throw new Error(`unknown stage ${JSON.stringify(stage)}`);
+    if (!known.has(stage)) {
+      throw new Error(
+        `unknown stage or agent ${JSON.stringify(stage)} (known: ${[...known].sort().join(", ")})`,
+      );
     }
     if (!Array.isArray(steps)) throw new Error(`${stage}: steps must be an array`);
     for (const step of steps) {
@@ -44,7 +49,10 @@ export class FakeRunner implements Runner {
 
   async run(spec: RunSpec): Promise<RunResult> {
     this.calls.push(spec);
-    const step = this.#script[spec.stage]?.shift() ?? { verdict: "PASS" };
+    const steps = this.#script[spec.agent]?.length
+      ? this.#script[spec.agent]
+      : this.#script[spec.stage];
+    const step = steps?.shift() ?? { verdict: "PASS" };
     for (const [path, content] of Object.entries(step.files ?? {})) {
       const file = join(spec.workdir, path);
       await mkdir(dirname(file), { recursive: true });

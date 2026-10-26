@@ -10,7 +10,10 @@ import { FIXTURE_PLAN, removeTmpDirs, tmpDir } from "./helpers.ts";
 
 afterEach(removeTmpDirs);
 
-test("tracer: import → go → run --until-idle with a scripted review failure", async () => {
+/** The Stages of the default Pipeline after `review`. */
+const TAIL = ["verify", "evidence", "task_approval", "research"];
+
+test("tracer: import → go → run --until-idle on the default Pipeline, with a scripted review failure", async () => {
   const ntfy = new FakeNtfy();
   const server = await ntfy.start();
   try {
@@ -24,8 +27,8 @@ test("tracer: import → go → run --until-idle with a scripted review failure"
         out: (l) => out.push(l),
         err: (l) => out.push(l),
         runner: new FakeRunner({
-          implement: [{ verdict: "PASS", usage: { input_tokens: 5, output_tokens: 6 } }],
-          review: [
+          "implementer-tdd": [{ verdict: "PASS", usage: { input_tokens: 5, output_tokens: 6 } }],
+          "reviewer-standards": [
             { verdict: "FAIL", usage: { input_tokens: 11, output_tokens: 22 } },
             { verdict: "PASS", usage: { input_tokens: 33, output_tokens: 44 } },
           ],
@@ -58,22 +61,19 @@ test("tracer: import → go → run --until-idle with a scripted review failure"
         ...extra,
         ["lease.released", task],
       ];
-      const plain = (task: string) => [
-        ...tickOf(task, "workup"),
-        ...tickOf(task, "implement"),
-        ...tickOf(task, "review"),
-      ];
+      const after = (task: string, ...stages: string[]) => stages.flatMap((st) => tickOf(task, st));
+      // The Stages of defaults/pipeline.toml, in order. `review` is the one with two Agents.
+      const plain = (task: string) =>
+        after(task, "workup", "red", "implement", "gates", "review", ...TAIL);
       assert.deepEqual(
         store.listEvents().map((e) => [e.type, e.subject]),
         [
           ["request.imported", "R-1"],
           ["request.go", "R-1"],
           // T-1's first review fails: a Round, caused by the review Stage.
-          ...tickOf("T-1", "workup"),
-          ...tickOf("T-1", "implement"),
+          ...after("T-1", "workup", "red", "implement", "gates"),
           ...tickOf("T-1", "review", ["round.started", "T-1"]),
-          ...tickOf("T-1", "implement"),
-          ...tickOf("T-1", "review"),
+          ...after("T-1", "implement", "gates", "review", ...TAIL),
           ...plain("T-2").slice(0, -1),
           ["milestone.done", "M-1"],
           ["lease.released", "T-2"],
@@ -91,9 +91,10 @@ test("tracer: import → go → run --until-idle with a scripted review failure"
         round_total: 1,
       });
 
-      // One Run per stage run: 4 Tasks x 3 Stages, plus the Round's implement and review.
+      // One Run per Agent: 4 Tasks x 6 (workup, implement, two reviewers, verify, research), plus the
+      // Round's implement and two reviewers. Gates and the owner stage run no Agent.
       const runs = store.listRuns();
-      assert.equal(runs.length, 14);
+      assert.equal(runs.length, 27);
       assert.ok(runs.every((r) => r.ended_at && r.report_path && r.error === null));
       assert.ok(runs.every((r) => r.request_id === "R-1" && r.exit_code === 0));
       const failed = runs.filter((r) => r.verdict === "FAIL");
@@ -111,10 +112,20 @@ test("tracer: import → go → run --until-idle with a scripted review failure"
       assert.ok(runs.every((r) => r.report_path === join(runsDir, `${r.id}-${r.stage}.md`)));
       assert.equal(existsSync(join(home, "reports")), false);
       assert.deepEqual(usage("implement")[0], [5, 6]);
-      assert.deepEqual(usage("review").slice(0, 2), [
-        [11, 22],
-        [33, 44],
-      ]);
+      assert.deepEqual(
+        runs
+          .filter((r) => r.agent === "reviewer-standards")
+          .slice(0, 2)
+          .map((r) => [r.tokens_in, r.tokens_out]),
+        [
+          [11, 22],
+          [33, 44],
+        ],
+      );
+      assert.deepEqual(
+        runs.filter((r) => r.stage === "review").map((r) => r.agent),
+        Array.from({ length: 5 }, () => ["reviewer-standards", "reviewer-spec"]).flat(),
+      );
     } finally {
       store.close();
     }

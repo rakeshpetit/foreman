@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { PIPELINE, type Stage, VERDICTS, type Verdict } from "../engine/route.ts";
+import { type Stage, VERDICTS, type Verdict } from "../engine/route.ts";
 import { MIGRATIONS } from "./schema.ts";
 
 export type Mode = "manual" | "auto";
@@ -55,7 +55,6 @@ function taskRow(row: Row): TaskRow {
     ...(row as unknown as TaskRow),
     origin: oneOf(ORIGINS, row.origin, where, "origin"),
     lane: oneOf(LANES, row.lane, where, "lane"),
-    stage: orNull(PIPELINE, row.stage, where, "stage"),
     status: oneOf(TASK_STATUSES, row.status, where, "status"),
   };
 }
@@ -64,7 +63,6 @@ function runRow(row: Row): RunRow {
   const where = `runs ${String(row.id)}`;
   return {
     ...(row as unknown as RunRow),
-    stage: oneOf(PIPELINE, row.stage, where, "stage"),
     verdict: orNull(VERDICTS, row.verdict, where, "verdict"),
   };
 }

@@ -1,7 +1,6 @@
 import * as nodeFs from "node:fs";
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { PIPELINE } from "../engine/route.ts";
 import type { Store } from "../store/store.ts";
 import { parseTasks, planTitle } from "./parse.ts";
 
@@ -57,7 +56,6 @@ export function importPlan(
             kind: pt.kind,
             size_est: pt.size_est,
             origin: "planned",
-            stage: PIPELINE[0],
             file_path: (id) => join(".foreman", req.id, "tasks", `${id}.md`),
           });
           ids.set(pt.ref, t.id);

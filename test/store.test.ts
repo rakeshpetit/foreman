@@ -43,7 +43,7 @@ test("Store.db is private", () => {
   assert.ok(s.db);
 });
 
-test("an unknown Origin, Lane, Stage, kind or channel is a type error", () => {
+test("an unknown Origin, Lane, Approval kind or channel is a type error", () => {
   const s = Store.memory();
   const r = s.createRequest({ title: "a", target_repo: "/r" });
   const m = s.createMilestone({ request_id: r.id, seq: 1, title: "m" });
@@ -55,10 +55,6 @@ test("an unknown Origin, Lane, Stage, kind or channel is a type error", () => {
   assert.throws(() => {
     // @ts-expect-error "slow" is not a Lane
     s.createTask({ ...base, lane: "slow" });
-  });
-  assert.throws(() => {
-    // @ts-expect-error "deploy" is not a Stage
-    s.createTask({ ...base, stage: "deploy" });
   });
   assert.throws(() => {
     // @ts-expect-error "wish" is not an Approval kind
@@ -77,11 +73,9 @@ test("a stored row with an unknown value throws a clear error when read", () => 
   const r = s.createRequest({ title: "a", target_repo: "/r" });
   const m = s.createMilestone({ request_id: r.id, seq: 1, title: "m" });
   const t = s.createTask({ milestone_id: m.id, seq: 1, title: "t" });
-  raw.prepare("UPDATE tasks SET stage = 'deploy' WHERE id = ?").run(t.id);
-  assert.throws(() => s.getTask(t.id), /tasks T-1: unknown stage "deploy"/);
-  assert.throws(() => s.listTasks(), /unknown stage/);
-  raw.prepare("UPDATE tasks SET stage = NULL, origin = 'robot' WHERE id = ?").run(t.id);
+  raw.prepare("UPDATE tasks SET origin = 'robot' WHERE id = ?").run(t.id);
   assert.throws(() => s.getTask(t.id), /tasks T-1: unknown origin "robot"/);
+  assert.throws(() => s.listTasks(), /unknown origin/);
 
   const run = s.createRun({ task_id: t.id, request_id: r.id, stage: "review" });
   raw.prepare("UPDATE runs SET verdict = 'pass' WHERE id = ?").run(run);

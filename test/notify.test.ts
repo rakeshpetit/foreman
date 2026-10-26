@@ -10,7 +10,7 @@ import { FakeRunner } from "../src/runner/fake.ts";
 import type { Runner } from "../src/runner/runner.ts";
 import { Store } from "../src/store/store.ts";
 import { FakeNtfy } from "./fakes/ntfy/server.ts";
-import { buildingRequest, removeTmpDirs, tmpDir } from "./helpers.ts";
+import { buildingRequest, defaultPipeline, removeTmpDirs, tmpDir } from "./helpers.ts";
 
 const fake = new FakeNtfy();
 let url: string;
@@ -105,10 +105,12 @@ test("a hung ntfy server delays a tick by no more than the timeout, and the fail
     const results = await runEngine(seed(), {
       home: dir,
       untilIdle: true,
+      pipeline: defaultPipeline(),
       runner: new FakeRunner(),
       notifier,
     });
-    assert.equal(results.filter((r) => r.kind === "ran").length, 3);
+    // One Task through the 9 Stages of the default Pipeline.
+    assert.equal(results.filter((r) => r.kind === "ran").length, 9);
     // Two pings (Task done, Request done), each cut off at 200 ms.
     assert.ok(Date.now() - started < 2000);
   } finally {
@@ -152,6 +154,7 @@ usage_topic = "usage-topic"
   await runEngine(seed(), {
     home: dir,
     untilIdle: true,
+    pipeline: defaultPipeline(),
     runner: new FakeRunner(),
     notifier: ntfyFromConfig(dir, {}),
   });
@@ -170,7 +173,13 @@ test("a Runner that throws sends one engine-error ping, rewrites STATUS.md, stop
     },
   };
   fake.calls.length = 0;
-  const results = await runEngine(store, { home: dir, untilIdle: true, runner, notifier });
+  const results = await runEngine(store, {
+    home: dir,
+    untilIdle: true,
+    pipeline: defaultPipeline(),
+    runner,
+    notifier,
+  });
   assert.deepEqual(
     results.map((r) => r.kind),
     ["error"],

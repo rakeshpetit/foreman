@@ -1,7 +1,9 @@
+import { DONE, type Pipeline, type StageConfig } from "../config/pipeline.ts";
 import { isSettled, type Store, type TaskRow } from "../store/store.ts";
-import { PIPELINE, route, type Stage, type Transition, type Verdict } from "./route.ts";
+import { enter, route, type Stage, stageOf, type Transition, type Verdict } from "./route.ts";
 
-export type StageExecutor = (task: TaskRow, stage: Stage) => Promise<Verdict>;
+/** Does the work of one Stage for one Task and says whether it passed. Throws if it cannot run. */
+export type StageExecutor = (task: TaskRow, stage: StageConfig) => Promise<Verdict>;
 
 /** What finished because a Task settled: Milestone ids, and the Request id once its last Milestone is done. */
 export interface Completed {
@@ -24,6 +26,7 @@ export type TickResult =
   | { kind: "error"; task: string; stage: Stage; message: string };
 
 export interface TickOptions {
+  pipeline: Pipeline;
   executor: StageExecutor;
   holder?: string;
   leaseMs?: number;
@@ -64,7 +67,17 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
   }
   store.addEvent("lease.taken", task.id, { holder });
   try {
-    const stage = task.stage ?? PIPELINE[0];
+    let stage: Stage;
+    let config: StageConfig;
+    try {
+      stage = task.stage ?? enter(opts.pipeline, opts.pipeline.stages[0]?.name ?? DONE, task.lane);
+      if (stage === DONE) throw new Error(`no stage runs in the ${task.lane} lane`);
+      config = stageOf(opts.pipeline, stage);
+    } catch (e) {
+      // The config no longer fits the Task. Leave it untouched for the Owner to fix the config.
+      const message = e instanceof Error ? e.message : String(e);
+      return { kind: "error", task: task.id, stage: task.stage ?? "", message };
+    }
     store.transaction(() => {
       store.updateTask(task.id, { status: "active", stage });
       // A Task starts when it leaves `queued`: the first tick, and again after a crash put it back.
@@ -72,7 +85,7 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
     });
     let verdict: Verdict;
     try {
-      verdict = await opts.executor(task, stage);
+      verdict = await opts.executor(task, config);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       store.transaction(() => {
@@ -81,7 +94,7 @@ export async function tick(store: Store, opts: TickOptions): Promise<TickResult>
       });
       return { kind: "error", task: task.id, stage, message };
     }
-    const transition = route(stage, verdict, task);
+    const transition = route(opts.pipeline, stage, verdict, task);
     const completed = apply(store, task, stage, verdict, transition);
     return { kind: "ran", task: task.id, stage, verdict, transition, completed };
   } finally {

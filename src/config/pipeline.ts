@@ -52,7 +52,7 @@ type Checked = Omit<Parsed, "stages"> & {
 };
 type CheckedStage = Checked["stages"][number];
 
-/** One Stage of the Pipeline, as configured. (`engine/route.ts` still has its own hard-coded `Stage`.) */
+/** One Stage of the Pipeline, as configured. */
 export interface StageConfig {
   name: string;
   type: (typeof STAGE_TYPES)[number];
@@ -82,8 +82,10 @@ export interface Pipeline {
 }
 
 export interface PipelineOptions {
-  /** Every Agent name that exists, to catch a typo in `agents`. */
-  agents: ReadonlySet<string>;
+  /** Every Agent name that exists, to catch a typo in `agents`. Unchecked when absent (no Agent library yet). */
+  agents?: ReadonlySet<string>;
+  /** Every Gate name that exists, to catch a typo in `gates`. Unchecked when absent. */
+  gates?: ReadonlySet<string>;
   /** Named in error messages. Defaults to `pipeline.toml`. */
   source?: string;
 }
@@ -104,7 +106,7 @@ export function loadPipeline(path: string, opts: Omit<PipelineOptions, "source">
 }
 
 /** Parses and validates a `pipeline.toml`, filling in defaults. Throws a `PipelineError` listing every problem. */
-export function parsePipeline(text: string, opts: PipelineOptions): Pipeline {
+export function parsePipeline(text: string, opts: PipelineOptions = {}): Pipeline {
   const source = opts.source ?? "pipeline.toml";
   let raw: unknown;
   try {
@@ -123,7 +125,7 @@ export function parsePipeline(text: string, opts: PipelineOptions): Pipeline {
     );
   }
   const parsed = withDefaultOnPass(shape.data);
-  const issues = checkMeaning(parsed, opts.agents);
+  const issues = checkMeaning(parsed, opts);
   if (issues.length > 0) throw new PipelineError(issues, source);
   return resolve(parsed);
 }
@@ -157,7 +159,10 @@ function resolve(p: Checked): Pipeline {
 }
 
 /** What zod's shape check cannot see: references between Stages, Agents and lanes, and loops. */
-function checkMeaning(p: Checked, knownAgents: ReadonlySet<string>): string[] {
+function checkMeaning(
+  p: Checked,
+  { agents: knownAgents, gates: knownGates }: PipelineOptions,
+): string[] {
   const issues: string[] = [];
   const stageNames = p.stages.map((s) => s.name);
   const targets = [...stageNames, DONE].join(", ");
@@ -173,8 +178,9 @@ function checkMeaning(p: Checked, knownAgents: ReadonlySet<string>): string[] {
       byName.set(s.name, s);
     }
   }
-  const known = [...knownAgents].sort().join(", ");
   const checkAgents = (where: string, agents: string[]) => {
+    if (!knownAgents) return;
+    const known = [...knownAgents].sort().join(", ");
     for (const a of agents) {
       if (!knownAgents.has(a)) issues.push(`${where}: unknown agent "${a}" (known: ${known})`);
     }
@@ -189,7 +195,14 @@ function checkMeaning(p: Checked, knownAgents: ReadonlySet<string>): string[] {
       issues.push(`${at}: agents are only for agent stages, and this is a ${s.type} stage`);
     }
     if (s.type === "gate") {
-      if (!s.gates) issues.push(`${at}: gate stages need gates, e.g. gates = ["check_passes"]`);
+      if (!s.gates) {
+        issues.push(`${at}: gate stages need gates, e.g. gates = ["check_passes"]`);
+      } else if (knownGates) {
+        const known = [...knownGates].sort().join(", ");
+        for (const g of s.gates) {
+          if (!knownGates.has(g)) issues.push(`${at}: unknown gate "${g}" (known: ${known})`);
+        }
+      }
     } else if (s.gates) {
       issues.push(`${at}: gates are only for gate stages, and this is a ${s.type} stage`);
     }

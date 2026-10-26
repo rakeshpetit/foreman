@@ -2,6 +2,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { runEngine } from "../commands/run.ts";
+import {
+  DEFAULT_PIPELINE_PATH,
+  loadPipeline,
+  type Pipeline,
+  PipelineError,
+} from "../config/pipeline.ts";
+import { STUB_GATES } from "../engine/executors.ts";
 import { importPlan } from "../importer/import.ts";
 import { ImportError } from "../importer/parse.ts";
 import { ntfyFromConfig } from "../notify/config.ts";
@@ -83,7 +90,7 @@ export async function main(argv: string[], ctx: Context): Promise<number> {
     return code;
   } catch (e) {
     // Expected failures are one line (ImportError already carries "line N:"); anything else keeps its stack.
-    if (e instanceof ImportError) return fail(ctx, e.message);
+    if (e instanceof ImportError || e instanceof PipelineError) return fail(ctx, e.message);
     if (e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT") {
       return fail(ctx, e.message);
     }
@@ -127,11 +134,14 @@ async function dispatch(
       return 0;
     }
     case "run": {
+      const pipeline = loadPipeline(DEFAULT_PIPELINE_PATH, {
+        gates: new Set(Object.keys(STUB_GATES)),
+      });
       let runner = ctx.runner;
       if (!runner && values.fake !== undefined) {
         try {
           const json: unknown = JSON.parse(readFileSync(resolve(ctx.cwd, values.fake), "utf8"));
-          runner = new FakeRunner(parseFakeScript(json));
+          runner = new FakeRunner(parseFakeScript(json, scriptNames(pipeline)));
         } catch (e) {
           const why = e instanceof Error ? e.message : String(e);
           return fail(ctx, `Cannot read --fake script ${values.fake}: ${why}`);
@@ -148,6 +158,7 @@ async function dispatch(
         home,
         untilIdle: values["until-idle"] ?? false,
         runner,
+        pipeline,
         notifier,
       });
       const ran = results.filter((r) => r.kind === "ran").length;
@@ -171,6 +182,19 @@ async function dispatch(
     default:
       return fail(ctx, `Unknown command: ${command}`);
   }
+}
+
+/** The names a `--fake` script may key its steps by: every Stage and every Agent in the Pipeline. */
+function scriptNames(pipeline: Pipeline): Set<string> {
+  const names = new Set<string>();
+  for (const s of pipeline.stages) {
+    names.add(s.name);
+    for (const a of s.agents ?? []) names.add(a);
+  }
+  for (const byStage of Object.values(pipeline.kinds)) {
+    for (const agents of Object.values(byStage)) for (const a of agents) names.add(a);
+  }
+  return names;
 }
 
 function parse(argv: string[]) {

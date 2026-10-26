@@ -44,6 +44,16 @@ require = "all"
 on_fail = "implement"
 `;
 
+function issuesOfOpts(text: string, opts: Parameters<typeof parsePipeline>[1]): string[] {
+  try {
+    parsePipeline(text, opts);
+  } catch (e) {
+    assert.ok(e instanceof PipelineError, `expected a PipelineError, got ${String(e)}`);
+    return e.issues;
+  }
+  assert.fail("expected the Pipeline to be rejected");
+}
+
 function issuesOf(text: string, agents = AGENTS): string[] {
   try {
     parsePipeline(text, { agents });
@@ -123,6 +133,20 @@ under_lines = 30
     assert.match(issue ?? "", /on_fail/);
     assert.match(issue ?? "", /"implment" is not a stage/);
     assert.match(issue ?? "", /workup, implement, review, done/);
+  });
+
+  it("rejects an unknown Gate when the known Gates are given, and skips Agent and Gate checks when not", () => {
+    const text = `${VALID}
+[[stages]]
+name = "gates"
+type = "gate"
+gates = ["check_passes", "chek_passes"]
+on_fail = "implement"
+`;
+    assert.deepEqual(issuesOfOpts(text, { gates: new Set(["check_passes", "diff_size"]) }), [
+      'stage "gates": unknown gate "chek_passes" (known: check_passes, diff_size)',
+    ]);
+    assert.ok(parsePipeline(text));
   });
 
   it("rejects an unknown Agent and lists the known ones", () => {
